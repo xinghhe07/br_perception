@@ -42,3 +42,10 @@ desktop.ini
 # ── 规则书原件 (主办方材料, public 仓库不宜转载; 要纳管就删掉下面两行) ──
 doc/Robocon_2027_Rulebook_v1.0 _CN.pdf
 scripts/_rb11.pdf
+
+# ── 规则书提取文本 (与上面的 PDF 同理: 主办方材料, public 仓库不宜转载) ──
+scripts/_rb*.txt
+scripts/_rulebook*.txt
+
+# ── 代码目录里的散图 (图统一放 doc/) ──
+src/**/*.svg
