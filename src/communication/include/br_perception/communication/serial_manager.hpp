@@ -54,7 +54,12 @@ struct SerialConfig {
   std::string device{"/dev/ttyUSB0"};
 
   // ── 物理层 (⚠ 待与下位机确认) ──
-  int baud_rate{115200};
+  // ✅ 2026-09-20: 115200 → 460800, 与 config/comm_params.yaml 保持一致
+  //   (本文件头警告: 两处不一致会导致"传/不传 --params-file 行为不同")
+  //   依据: 感知帧 280B, 8N1 → 115200 传输 24.3ms / 460800 传输 6.1ms;
+  //        端到端 68-76ms → 50-58ms, 落进指标 55-60ms 内。
+  //   termios 映射 (to_speed) 已支持 B460800, 无需另改。
+  int baud_rate{460800};
   int data_bits{8};              ///< 5..8
   int stop_bits{1};              ///< 1 或 2
   char parity{'N'};              ///< 'N' 无 / 'E' 偶 / 'O' 奇

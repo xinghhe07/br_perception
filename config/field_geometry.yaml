@@ -344,14 +344,20 @@
       earth_block_blue:      [50, 0, 255]      # Earth Block (Blue)
       sky_block_red_face:    [223, 34, 34]     # Sky Block (Red Face)
       sky_block_blue_face:   [50, 0, 255]      # Sky Block (Blue Face)
-      # ── 穆斯蒂卡 — ★ 已决 (2026-09-17 用户确认): **金色球** ──
-      #   v1.1 英文说 Mikasa V300W 排球 (黄1235C/蓝3591C), v1.0 中文说五人制足球(尺寸4 Ø200 金);
-      #   用户裁定 = 金色球 → v1.0 为准, v1.1 的排球说法作废。
-      #   ⚠ 下面两条 Pantone 近似值是**排球**的, 保留仅为存档, 别再用; 检测阈值用 mustika_gold。
-      #   ⚠ 金属漆色 (218-165-32) 在相机里会随光照偏移, 实战仍须现场对实物取样标定
-      #     (见 color_thresholds.yaml 的现场校准要求)
-      mustika_ball_yellow_p1235c: [255, 184, 28]   # ⚠ 排球用, 已作废 (Pantone 1235C 近似)
-      mustika_ball_blue_p3591c:   [3,   37,  126]  # ⚠ 排球用, 已作废 (Pantone 3591C 近似)
+      # ── 穆斯蒂卡 — ★ 2026-09-20 按 v1.1 **一手原文**改正: **排球** ──
+      #   官方 v1.1 (ABU 组委会 2026-08-20 生成) 第 10 页原文:
+      #     "A Mikasa V300W volleyball (Size 5, circumference 65–67 cm) shall be
+      #      used in its original condition without additional paint or coating.
+      #      Approximate weight: 260–280 grams."
+      #   → 实物 = 排球(黄底+蓝纹+白字) Ø≈210, 不是金色球。
+      #
+      #   ⚠️ 2026-09-17 曾裁定"金色球 Ø200", 依据是**中文 v1.0 译本**;
+      #      该译本已过时 —— v1.1 才是现行版本, 故该裁定作废。详见
+      #      doc/任务_v1.7.docx §十四 与 doc/自主探索 的规则基线说明。
+      #   ⚠ 赛场灯光会让色相偏移, 实战仍须现场对实物取样标定
+      #     (见 color_thresholds.yaml 的 yellow_ball / blue_mark / white_mark)
+      mustika_ball_yellow_p1235c: [255, 184, 28]   # ✅ 排球黄底 (Pantone 1235C 近似)
+      mustika_ball_blue_p3591c:   [3,   37,  126]  # ✅ 排球蓝纹 (Pantone 3591C 近似)
       # ── 旧键名保留 (向后兼容; 生成器/绘图脚本仍在用) ──
       red_team_start:        [223, 34, 34]     # ≡ start_retry_red
       blue_team_start:       [50, 0, 255]      # ≡ start_retry_blue
@@ -360,7 +366,8 @@
       pillar_brown:          [100, 62, 0]      # ≡ mustika/central_pillar_brown
       fence_gray:            [190, 190, 185]   # ⚠ 名不副实: 190-190-185 是 L1/L2 周界屏障·侧墙·L2 地面;
                                                #   场地边界与中轴隔墙其实是 100-62-0 (见 game_field_boundary)
-      mustika_gold:          [218, 165, 32]    # ✅ 穆斯蒂卡配色 (2026-09-17 用户确认金球; 检测器用这条)
+      mustika_gold:          [218, 165, 32]    # ⚠ 已作废 (2026-09-17 金球裁定被 v1.1 推翻); 保留仅为向后兼容
+      mustika_ball:          [255, 184, 28]    # ✅ 穆斯蒂卡配色 = 排球黄底 (2026-09-20; 渲染/可视化用这条)
     # ── 10.5 游戏对象尺寸 (规则书术语表, OFFICIAL; 供检测器与塔高分类) ──
     game_objects:
       earth_block:                  # ✅ 立方体 350×350×350 (±5%), 每队 20 个, 约 600g
@@ -369,9 +376,23 @@
       sky_block:                    # ✅ 立方体 200×200×200 (±5%), 共 12 个, 约 220g
         size: [0.20, 0.20, 0.20]    #    一面红一面蓝 (colored red on one side and blue on the other)
         count: 12
-      mustika:                      # ✅ 2026-09-17 用户确认: "金色的, 球形的, 有大小"
-        diameter: 0.20              #    → 金色球 Ø200 (v1.0 中文: 标准五人制足球 尺寸4, Ø200,
-        points: 250                 #      金属漆, 400-440g)。v1.1 的 "Mikasa V300W 排球 Ø210" 作废。
+      mustika:                      # ✅ 2026-09-20 按 v1.1 一手原文改正 (原"金色球"裁定作废)
+        diameter: 0.21              #    → Mikasa V300W 排球 Size5, 周长 65–67 cm → Ø≈210
+        weight_g: [260, 280]        #    v1.1 原文: "Approximate weight: 260–280 grams"
+        points: 250                 #    250 分 (规则 8.5.1), 需圣所使命达成 (规则 3.6.1)
+        # ── 2026-09-20 补: 球与柱顶凹槽的**坐姿几何** ──
+        #   ⚠ 球 Ø210 **比凹槽 Ø180 还大** → 球是「**坐**」在槽口上 (杯口放球), 不是掉进去。
+        #     这是「把球送进 Ø180 凹槽」那个说法错的根源 —— 见任务书 §3.0.3。
+        #   球心高出柱顶: √(R² − r²) = √(0.105² − 0.09²) = 0.054 m
+        #     地面穆斯蒂卡柱 (顶面 0.5) → 球心 z = 0.554
+        #     L2 核心柱     (顶面 1.7) → 球心 z = 1.754
+        #   放置容差 = R − r = 0.105 − 0.09 = **±0.015 m (15mm)**, 不是 mm 级。
+        #   (旧注释里 0.50+√(0.1²−0.09²)=0.5436 是 Ø200 球的算法, 已废)
+        seated_on_receptacle:
+          ball_radius: 0.105
+          receptacle_radius: 0.09
+          center_above_pillar_top: 0.054
+          placement_tolerance: 0.015
       complete_tower:               # ✅ OFFICIAL 定义: 恰好 2 个地球方块竖叠 + 顶部 1 个天空方块
         height: 0.90                #    0.35 + 0.35 + 0.20 = 0.90
         composition: [earth_block, earth_block, sky_block]
@@ -410,8 +431,17 @@
 #   1) 天空棋盘 12 块的**色序**未实测: 几何(外框1200/内框1000/单格200/中心/块数)已确认, 但每格红蓝朝向
 #      是按规则 4.1.4 "沿中心列镜像" 推的先验 — 待官方图3/4 或现场核对
 #   2) SW 地图的实体面/体色未与 §14 官方表比对 (SW 是自家模型, 可能有偏; 非阻塞, 开着 SW 时顺手核)
-#   3) 穆斯蒂卡: v1.1 说球场用 Mikasa V300W 排球, v1.0(中文) 说是金色五人制足球 —
-#      需向组委会确认实物, 并在现场对实物取样标定阈值 (config 内两条 Pantone 近似值仅供参考)
+#   3) ~~穆斯蒂卡金球 vs 排球~~ —— ✅ **2026-09-20 关闭**: 查了 v1.1 一手原文
+#      (`scripts/_rb11.pdf` 第 10 页, ABU 组委会 2026-08-20 生成), 明文是
+#      "A Mikasa V300W volleyball (Size 5, circumference 65–67 cm) ... 260–280 grams"
+#      → **排球**。"金色球" 是中文 v1.0 过时译本的产物, 该裁定已废 (见 zone_colors)。
+#      ⚠ 遗留: 现场仍须对实物取色, 用 scripts/hsv_tuner.py 重标 yellow_ball/blue_mark/white_mark
+#   4) **L1 周界护栏未建成几何** (2026-09-19 发现): 规则明文
+#      "L1周界防护栏: 设置于1级平台外缘的防护装置, 用于防止机器人及物体从高架平台上坠落",
+#      官方 `2区栅栏` 厚 50mm、立在台面边**内侧** x[2.50,2.55] / [8.45,8.50] ——
+#      但**只写在下方 l1_platform 的注释里, 没有独立字段**。任何几何消费者
+#      (路网 / costmap / 仿真世界) 都看不见它。待决定: 补一个 l1_perimeter 段,
+#      还是在布置路网节点时把它当已知边界。⚠ 别据此以为 L1 有高坠风险 —— 它已被这道护栏挡住。
 # 已于 2026-09-11 关闭: 天空棋盘格距 (用户更正: 内框 1000 分 5×5 单格 200, 旧 0.24 系拿 1200÷5 误算); zone_colors 按 §14 全表补全 (43 键, 修正"场地边界/中轴隔墙是棕 100-62-0 而非灰"); L1 建筑位中间行 (用户 "1没得", L1 共 6 位); platform_z 单值 (代码已加 building_spot_z, L2 4 位已入列); BR 启动格 = 内格;
 #   L1 中央矮带语义 = 草图25 L1→L2 阶梯 (2 级 ×150mm, 见 l1_l2_stairs);
 #   坡道 (草图45) = 3500mm 已入 config; 蓝侧转运区 (9.0,4.2) 经 "镜向1" + 草图46 蓝侧开口确认;

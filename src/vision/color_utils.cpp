@@ -3,7 +3,7 @@
 ///
 /// 传统 CV HSV 阈值方法，用于:
 ///   - 建筑位颜色判定 (green_building_spot)
-///   - 穆斯蒂卡金银球识别 (golden_mustika)
+///   - 穆斯蒂卡识别 (v1.1 排球: yellow_ball / blue_mark / white_mark)
 ///   - 队伍颜色识别 (red_team / blue_team)
 ///   - 围栏/边界检测 (brown_fence)
 ///   - 核心支柱识别 (brown_core_pillar / dark_green_pillar)
@@ -12,6 +12,8 @@
 #include "br_perception/vision/color_utils.hpp"
 
 #include <algorithm>
+#include <fstream>
+#include <sstream>
 #include <stdexcept>
 
 namespace br_perception {
@@ -33,7 +35,12 @@ const std::unordered_map<std::string, cv::Scalar> kColorMapBGR = {
   // 比赛元素
   {"red_team",            cv::Scalar(  34,  34, 255)},  // BGR: 红 → (0,0,255) 显示大红
   {"blue_team",           cv::Scalar( 255,   0,  50)},  // BGR: 蓝 → (255,0,0) 显示蓝
-  {"golden_mustika",      cv::Scalar(  32, 165, 218)},  // BGR: 金 → (0,215,255) 显示金
+  // ✅ 2026-09-20: 穆斯蒂卡按 v1.1 改正为**排球**(黄底+蓝纹+白字)。
+  //    golden_mustika 保留仅为向后兼容; 新代码用 yellow_ball / blue_mark / white_mark。
+  {"yellow_ball",         cv::Scalar(  28, 184, 255)},  // BGR: 排球黄底 (Pantone 1235C)
+  {"blue_mark",           cv::Scalar( 126,  37,   3)},  // BGR: 排球蓝纹 (Pantone 3591C)
+  {"white_mark",          cv::Scalar( 245, 245, 245)},  // BGR: 排球白字
+  {"golden_mustika",      cv::Scalar(  32, 165, 218)},  // BGR: 金 → 已废弃, 仅兼容
   {"dark_green_pillar",   cv::Scalar(  50, 150,  40)},  // BGR: 深绿
   {"brown_core_pillar",   cv::Scalar(   0,  62, 100)},  // BGR: 棕
   {"green_building_spot", cv::Scalar(  50, 200,  40)},  // BGR: 绿 (比深绿亮一些)
@@ -69,10 +76,33 @@ constexpr int kMaxGroupsPerColor = 8;
 std::unordered_map<std::string, ColorThreshold> load_color_thresholds(
     const std::string& yaml_path)
 {
-  // ── 打开 YAML ──
-  cv::FileStorage fs(yaml_path, cv::FileStorage::READ | cv::FileStorage::FORMAT_YAML);
-  if (!fs.isOpened()) {
+  // ── 读文件 + 补 YAML 指令头 ──
+  // ⚠️⚠️ 为什么必须补这一行 (2026-09-21 VM 实测发现):
+  //   OpenCV 的 FileStorage **靠开头几个字节猜格式** (`%YAML` / `<?xml` / `{`),
+  //   **不看文件后缀**。而本文件开头是 `# ═══` 注释框 → 它在 sniff 阶段就
+  //   报 `Input file is invalid` 放弃 (persistence.cpp:682),
+  //   **根本轮不到语法解析**。
+  //   后果（踩过一次, 很贵）: 三个检测器全部静默退回硬编码阈值 ——
+  //   hsv_tuner.py 存盘白存, 现场对着实物怎么调都不生效, 只 WARN 一句就过去。
+  //   ⚠️ 加了表头之后, 本文件的 flow 风格 `{ lower: [...], upper: [...] }`
+  //      是**能被正常解析**的 (2026-09-21 实测), 所以这里不需要改 yaml 写法。
+  std::ifstream ifs(yaml_path);
+  if (!ifs) {
     throw std::runtime_error("color_utils: cannot open color threshold file: " + yaml_path);
+  }
+  std::stringstream buf;
+  buf << ifs.rdbuf();
+  std::string text = buf.str();
+  if (text.rfind("%YAML", 0) != 0) {
+    text = "%YAML:1.0\n---\n" + text;
+  }
+
+  // ── 从内存解析（不走文件路径 —— 上面已经自己读进来了）──
+  cv::FileStorage fs(text, cv::FileStorage::READ |
+                           cv::FileStorage::MEMORY |
+                           cv::FileStorage::FORMAT_YAML);
+  if (!fs.isOpened()) {
+    throw std::runtime_error("color_utils: cannot parse color threshold file: " + yaml_path);
   }
 
   std::unordered_map<std::string, ColorThreshold> result;

@@ -22,8 +22,8 @@
     odom_frame: "odom"                       # 里程计坐标系 (§4.1; 文档 §1.5 表未列, 本处补)
     robot_base_frame: "base_link"            # 机器人基座
     lidar_frame: "livox_frame"               # 雷达 (Livox Mid-360 出厂 frame_id)
-    camera_front_frame: "camera_front_frame" # 前相机
-    camera_rear_frame: "camera_rear_frame"   # 后相机
+    camera_wide_frame: "camera_wide_frame" # 前相机
+    camera_tele_frame: "camera_tele_frame"   # 后相机
 
     # ═══════════════════════════════════════════════════════════════════════
     # 里程计接口 — coordinate_transformer (模块 17)
@@ -85,10 +85,17 @@
       dwell_limit_ms: 5000               # 共享区停留违规阈值 (规则 6.6)
 
     # ═══════════════════════════════════════════════════════════════════════
-    # 在线外参校验 (v1.2 增补 — extrinsic_monitor, 模块 22)
+    # 在线外参校验 (v1.2 增补 — extrinsic_monitor, 模块 28)
+    #   ⚠️ 2026-09-19 **降级为调试工具**: enabled 默认改 false (原 true)。理由三条:
+    #   ① 检测到外参漂移后**没有可执行的动作** —— 180s 比赛内无法重标定, 唯一能做的
+    #      就是"降级那路相机", 而这是个人看一眼就知道、可手动触发的决定, 不必自动检测;
+    #   ② CPU 受限 (6 核全分完), 常开的周期性校验是净负担;
+    #   ③ 融合层本来就在算**雷达-视觉一致性**, 拿它做异常告警是白送的, 不需要单独模块。
+    #   → 现场排查 / 标定后自检时手动打开即可。仍 ⛔ 在"需真实相机标定"上, 但**不占主线排期**。
+    #   ⚠ 原注释写"模块 22"有误 —— 22 是 protocol_encoder, 本模块是 28。
     # ═══════════════════════════════════════════════════════════════════════
     extrinsic_monitor:
-      enabled: true
+      enabled: false
       interval_sec: 30                   # 校验周期 (s) — 场地固定特征 (柱/建筑位绿格) PnP 校验
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -105,9 +112,9 @@
       livox_frame:
         translation: [0.0, 0.0, 0.25]    # ⚠ 占位: 雷达相对 base_link 的安装位置 (m)
         rotation_rpy: [0.0, 0.0, 0.0]    # ⚠ 占位: roll/pitch/yaw (rad)
-      camera_front_frame:
+      camera_wide_frame:
         translation: [0.15, 0.0, 0.35]   # ⚠ 占位: 与 camera_params.yaml extrinsics 一致
         rotation_rpy: [0.0, 0.0, 0.0]
-      camera_rear_frame:
+      camera_tele_frame:
         translation: [-0.15, 0.0, 0.35]  # ⚠ 占位
         rotation_rpy: [0.0, 0.0, 3.14159]

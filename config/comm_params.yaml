@@ -44,7 +44,17 @@ comm_node:
 
     # ── 串口物理层 (⚠ 未冻结: 待与下位机确认) ──
     serial_device: /dev/ttyUSB0
-    serial_baud_rate: 115200
+    # ✅ 2026-09-20 提到 460800 (原 115200). 依据 —— 端到端延迟:
+    #     感知帧 280 B (max_building_spots=16 + max_obstacles=10 算出的上界),
+    #     8N1 每字节 10 位:
+    #       115200 → 传输 24.3 ms → 端到端 68–76 ms
+    #       460800 → 传输  6.1 ms → 端到端 50–58 ms   ← 落在指标 55–60 ms 内
+    #       921600 → 传输  3.0 ms → 端到端 47–55 ms   (只再多省 3 ms, 不值)
+    #     通道容量: 460800 ÷ 10 ÷ 280 B = **164.6 Hz**, 对 send_rate_hz=50 有 3.3× 余量
+    #     (还要分给下行 ACK 与心跳)。
+    #   ⚠ 仍属"未冻结项" —— 必须下位机也支持 460800 才能定。定了要同步改
+    #     comm_node.cpp 的 declare_parameter 默认值 (见文件头最后一条警告)。
+    serial_baud_rate: 460800
     serial_data_bits: 8
     serial_stop_bits: 1
     serial_parity: "N"          # N 无 / E 偶 / O 奇 (大小写不敏感, 实现里会转大写)
@@ -64,9 +74,12 @@ comm_node:
     # ── 单帧容量上界 (⚠ 未冻结) ──
     # 改这里, encoder 的缓冲区预留与 decoder 的长度闸门都会自动跟随
     # (ProtocolConfig::max_payload_bytes 是从这两个字段算出来的, 不是另写常量)。
-    # ⚠ 但上界受串口吞吐限制: 单帧字节数 ≈ 26 + (1+4N) + (1+18M)。
-    #   115200 bps 下 200 字节约 17ms —— 想同时保持 send_rate_hz=50 不拥塞,
-    #   建议 N ≤ 32, M ≤ 20。当前 16/10 是任务书给的保守值, 别随手调大。
+    # ⚠ 但上界受串口吞吐限制。单帧线上字节 = 36 + 4N + 18M (6B 帧头 + 2B CRC 已计入),
+    #   115200 bps (10 bit/字节 → 11520 B/s) 下可持续帧率 = 11520 ÷ (36 + 4N + 18M)。
+    #   当前 16/10 → 280 B → 41 fps (2026-09-19 实测 41.3 fps, 吻合)。
+    #   发布侧频率必须低于此值: 超容量时 comm_node **不会**降频, 而是丢帧 +
+    #   叠加约 1.7s 陈旧度, 且该延迟在诊断里看不见 (只看到 frames_dropped_on_post 在涨)。
+    #   注意 N/M 调大会同时压低帧率上限 —— 例: 32/20 → 524 B → 只剩 22 fps。
     max_building_spots: 16
     max_obstacles: 10
 

@@ -19,8 +19,8 @@
     roi_max_z: 2.0
 
     # ── 地面分割 ──
-    ransac_dist_thresh: 0.04           # RANSAC 距离阈值 (m)
-    ransac_max_iters: 100
+    ransac_distance_threshold: 0.04           # RANSAC 距离阈值 (m)
+    ransac_max_iterations: 100
     ransac_eps_angle: 0.45             # 法向量约束角 (rad)
     enable_normal_constraint: true
     normal_angle_threshold: 0.15       # 验证阈值 (rad)
@@ -86,3 +86,30 @@
     debug_enabled: true                # 开启调试点云发布
     watchdog_timeout: 1.0              # 雷达超时阈值 (秒)
     max_skip_frames: 3                 # 最大连续跳帧数
+
+    # ── 2026-09-20 补齐: 代码 declare 但配置漏掉的键 (原先读不到, 配置改了不生效) ──
+    cylinder_mask_radius:          0.5   # 屏蔽区半径
+    cylinder_mask_x:               0.0   # 屏蔽区中心 x
+    cylinder_mask_y:               0.0   # 屏蔽区中心 y
+    enable_cylinder_mask:          false   # 圆柱检测时屏蔽自身
+    enable_self_filter:            false   # 自过滤开关 (机器人自身点云剔除)
+    height_threshold_values:       [0.04, 0.06, 0.10]   # 分层高度阈值表
+    height_threshold_z_keys:       [l0_height, l1_height, l2_height]   # 分层高度键名
+    self_radius_x:                 0.35   # 机器人半宽 (BR 700mm/2)
+    self_radius_y:                 0.35   # 机器人半长
+    self_radius_z:                 1.20   # 机器人高
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # ⚠️ 2026-09-20: 以下 3 个是**重复实现的别名键**, 两边都要留
+    #
+    # 由来: 本仓库的雷达层有**两份实现**在读同名参数, 但键名不一致 ——
+    #   · `lidar_perception_node.cpp` (独立节点, 1573 行)  读 ransac_dist_thresh / top_surface_min_pts
+    #   · `ground_segmenter.cpp` / `building_spot_analyzer.cpp` (组件, 被节点复用) 读 ransac_distance_threshold / top_surface_min_points
+    # 这两份是**同一套代码的两个副本**(台账 §六 已记为技术债, 容器化重构时要消掉)。
+    # 在消掉之前, **两个名字都必须存在**, 否则被弃用的那一半会静默读到代码默认值。
+    #
+    # 处置: 容器化重构做完后, 删掉本段, 只留组件侧的名字。
+    # ═══════════════════════════════════════════════════════════════════════
+    ransac_dist_thresh:            0.04   # ≡ ransac_distance_threshold (独立节点侧)
+    ransac_max_iters:              100    # ≡ ransac_max_iterations  (独立节点侧)
+    top_surface_min_pts:           3      # ≡ top_surface_min_points (独立节点侧)

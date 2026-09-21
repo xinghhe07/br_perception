@@ -300,7 +300,7 @@ std::unordered_map<std::string, double> color_pixel_ratios_batch(
 ///
 /// 用途: 在输出图像上绘制检测结果时，用约定颜色绘制对应目标的边界框/轮廓。
 ///
-/// @param label  颜色标签名 (如 "red_team", "blue_team", "golden_mustika")
+/// @param label  颜色标签名 (如 "red_team", "blue_team", "yellow_ball")
 /// @return BGR Scalar  (默认: 白色)
 cv::Scalar label_to_bgr(const std::string& label);
 
