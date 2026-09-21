@@ -7,7 +7,7 @@ make_gazebo_world.py — 基于 rc1_field_zup.stl 生成 Gazebo Classic 仿真�
   - 2 根柱(穆斯蒂卡柱 500mm / 核心支柱 800mm, 均在场地中心 5.5,5.5)
   - 12 个天空方块(200mm, 按 240mm 棋盘 5×5 布局, 绝对中心占位)
   - 一个"传感器平台"(代表 BR 感知安装位): 3D 雷达 + 前后双相机 + IMU
-    -> 发布到 /livox/lidar/pointcloud, /camera_front/image_raw, /camera_rear/image_raw, /imu/data
+    -> 发布到 /livox/lidar/pointcloud, /camera_wide/image_raw, /camera_tele/image_raw, /imu/data
 
 输出:
   scripts/out/gazebo/worlds/br_field.world
@@ -123,7 +123,7 @@ def gen_field_model():
 
 # 传感器平台: 用户 2026-09-11 明确 **没用, 删掉**, 2026-09-17 再次确认删掉 ——
 # 默认不生成也不放进世界。世界里那根"接地的柱"就是它的机身 (0.5×0.5×1.2 from z=0)。
-# 代价: 仿真里没有 /livox/lidar/pointcloud + /camera_front|rear/image_raw + /imu/data,
+# 代价: 仿真里没有 /livox/lidar/pointcloud + /camera_wide|tele/image_raw + /imu/data,
 #       launch/bringup_gazebo.launch.py 与 scripts/sim_patrol.py 会收不到数据。
 # 想恢复(比如需要仿真里有雷达/相机话题)就设 True, 会重新生成 models/sensor_rig。
 WITH_SENSOR_RIG = False
@@ -174,14 +174,16 @@ def gen_sensor_rig():
     A('        </plugin>')
     A('      </sensor>')
     A('    </link>')
-    # 前后相机
-    for name, dz, topic in (("cam_front", 0.4, "/camera_front/image_raw"),
-                            ("cam_rear", -0.4, "/camera_rear/image_raw")):
+    # 宽角 + 长焦 —— ✅ 2026-09-20 按实际装机改: 原来这里是"前/后"两颗(yaw 0 与 π),
+    #   但实机是 **JR H200S 一宽一长焦, 都朝前**(见任务书 §0 传感器行)。
+    #   仿真用不同 horizontal_fov 体现"一宽一长焦", 朝向都是 +x。
+    for name, hfov, topic in (("cam_wide", 1.10, "/camera_wide/image_raw"),
+                              ("cam_tele", 0.40, "/camera_tele/image_raw")):
         A('    <link name="%s">' % name)
-        A('      <pose>0 0 0.4 0 0 %s</pose>' % ("0" if topic.endswith("front/image_raw") else "3.1416"))
+        A('      <pose>0 0 0.4 0 0 0</pose>')          # 都朝 +x
         A('      <sensor name="%s_s" type="camera">' % name)
         A('        <always_on>true</always_on><update_rate>30</update_rate>')
-        A('        <camera><horizontal_fov>1.1</horizontal_fov>')
+        A('        <camera><horizontal_fov>%s</horizontal_fov>' % hfov)
         # Gazebo Classic 的 <format> 只认 R8G8B8 / B8G8R8 / L8 等; 写 RGB8 会报
         # "Error parsing image format" 并回落. gazebo_ros_camera 输出 BGR8,
         # 与 camera_params.yaml 的 pixel_format: "BGR8" 一致, 无需再改.
@@ -270,8 +272,8 @@ gazebo --verbose .../scripts/out/gazebo/worlds/br_field.world
 | 传感器 | 话题 |
 |---|---|
 | 3D 雷达(GPU ray, 10Hz) | `/livox/lidar/pointcloud` |
-| 前相机(30Hz) | `/camera_front/image_raw` |
-| 后相机(30Hz) | `/camera_rear/image_raw` |
+| 宽角(30Hz) | `/camera_wide/image_raw` |
+| 长焦(30Hz) | `/camera_tele/image_raw` |
 | IMU(100Hz) | `/imu/data` |
 
 这些话题名与 `src/lidar/lidar_preprocessor.cpp` 订阅的 `/livox/lidar/pointcloud`、

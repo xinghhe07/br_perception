@@ -45,8 +45,8 @@ TransformerParams TransformerParams::load_from_node(rclcpp::Node* node)
   p.odom_frame         = get_or_declare(node, "odom_frame", p.odom_frame);
   p.base_frame         = get_or_declare(node, "robot_base_frame", p.base_frame);
   p.lidar_frame        = get_or_declare(node, "lidar_frame", p.lidar_frame);
-  p.camera_front_frame = get_or_declare(node, "camera_front_frame", p.camera_front_frame);
-  p.camera_rear_frame  = get_or_declare(node, "camera_rear_frame", p.camera_rear_frame);
+  p.camera_wide_frame = get_or_declare(node, "camera_wide_frame", p.camera_wide_frame);
+  p.camera_tele_frame  = get_or_declare(node, "camera_tele_frame", p.camera_tele_frame);
   // 里程计输入
   p.odometry_topic   = get_or_declare(node, "odometry.topic", p.odometry_topic);
   p.imu_topic        = get_or_declare(node, "odometry.imu_topic", p.imu_topic);
@@ -109,8 +109,8 @@ CoordinateTransformer::CoordinateTransformer(rclcpp::Node* node,
               "坐标统一器就绪: %s ← %s(里程计 %s) ← %s ← {%s, %s, %s}",
               params_.world_frame.c_str(), params_.odom_frame.c_str(),
               params_.odometry_topic.c_str(), params_.base_frame.c_str(),
-              params_.lidar_frame.c_str(), params_.camera_front_frame.c_str(),
-              params_.camera_rear_frame.c_str());
+              params_.lidar_frame.c_str(), params_.camera_wide_frame.c_str(),
+              params_.camera_tele_frame.c_str());
 }
 
 CoordinateTransformer::~CoordinateTransformer() = default;

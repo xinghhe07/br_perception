@@ -17,6 +17,8 @@
 /// ═══════════════════════════════════════════════════════════════════════════════
 
 #include "br_perception/camera/building_spot_detector.hpp"
+// letterbox_to_orig_xy() —— 角点反算回原图坐标 (2026-09-20, P0-3)
+#include "br_perception/camera/image_preprocessor.hpp"
 #include "br_perception/vision/color_utils.hpp"
 
 #include <cv_bridge/cv_bridge.h>
@@ -131,18 +133,18 @@ BuildingSpotDetector::BuildingSpotDetector(const rclcpp::NodeOptions& options)
 
   // ── 订阅预处理图像 ──
   // ⚠ 与 image_preprocessor 的发布端保持同为 BEST_EFFORT (SensorDataQoS), 两侧一起改
-  sub_front_ = this->create_subscription<sensor_msgs::msg::Image>(
-    "/perception/camera_front/preprocessed", rclcpp::SensorDataQoS(),
-    std::bind(&BuildingSpotDetector::front_callback, this, std::placeholders::_1));
-  sub_rear_ = this->create_subscription<sensor_msgs::msg::Image>(
-    "/perception/camera_rear/preprocessed", rclcpp::SensorDataQoS(),
-    std::bind(&BuildingSpotDetector::rear_callback, this, std::placeholders::_1));
+  sub_wide_ = this->create_subscription<br_perception::msg::PreprocessedImage>(
+    "/perception/camera_wide/preprocessed", rclcpp::SensorDataQoS(),
+    std::bind(&BuildingSpotDetector::wide_callback, this, std::placeholders::_1));
+  sub_tele_ = this->create_subscription<br_perception::msg::PreprocessedImage>(
+    "/perception/camera_tele/preprocessed", rclcpp::SensorDataQoS(),
+    std::bind(&BuildingSpotDetector::tele_callback, this, std::placeholders::_1));
 
   // ── 发布 ──
-  pub_front_ = this->create_publisher<br_perception::msg::CameraBuildingSpot>(
-    "/perception/camera/building_spots_front", rclcpp::SensorDataQoS());
-  pub_rear_ = this->create_publisher<br_perception::msg::CameraBuildingSpot>(
-    "/perception/camera/building_spots_rear", rclcpp::SensorDataQoS());
+  pub_wide_ = this->create_publisher<br_perception::msg::CameraBuildingSpot>(
+    "/perception/camera/building_spots_wide", rclcpp::SensorDataQoS());
+  pub_tele_ = this->create_publisher<br_perception::msg::CameraBuildingSpot>(
+    "/perception/camera/building_spots_tele", rclcpp::SensorDataQoS());
 
   pub_diagnostics_ = this->create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
     "/perception/camera/building_spot_diagnostics", 10);
@@ -161,33 +163,34 @@ BuildingSpotDetector::BuildingSpotDetector(const rclcpp::NodeOptions& options)
 // ═══════════════════════════════════════════════════════════════════════════════
 // 回调
 // ═══════════════════════════════════════════════════════════════════════════════
-void BuildingSpotDetector::front_callback(const sensor_msgs::msg::Image::SharedPtr msg)
+void BuildingSpotDetector::wide_callback(const br_perception::msg::PreprocessedImage::SharedPtr msg)
 {
-  process_and_publish(msg, 0, pub_front_);
-  front_frame_seq_++;
+  process_and_publish(msg, 0, pub_wide_);
+  wide_frame_seq_++;
 }
 
-void BuildingSpotDetector::rear_callback(const sensor_msgs::msg::Image::SharedPtr msg)
+void BuildingSpotDetector::tele_callback(const br_perception::msg::PreprocessedImage::SharedPtr msg)
 {
-  process_and_publish(msg, 1, pub_rear_);
-  rear_frame_seq_++;
+  process_and_publish(msg, 1, pub_tele_);
+  tele_frame_seq_++;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 单路相机处理
 // ═══════════════════════════════════════════════════════════════════════════════
 void BuildingSpotDetector::process_and_publish(
-    const sensor_msgs::msg::Image::SharedPtr msg,
+    const br_perception::msg::PreprocessedImage::SharedPtr msg,
     uint8_t camera_id,
     const rclcpp::Publisher<br_perception::msg::CameraBuildingSpot>::SharedPtr& pub)
 {
-  const char* cam_name = (camera_id == 0) ? "front" : "rear";
+  const char* cam_name = (camera_id == 0) ? "wide" : "tele";
   auto t0 = std::chrono::steady_clock::now();
 
   // ── 1. ROS Image → cv::Mat ──
   cv::Mat bgr;
   try {
-    auto cv_ptr = cv_bridge::toCvShare(msg, sensor_msgs::image_encodings::BGR8);
+    // msg->image 是内嵌字段, 不是独立 shared_ptr → 带 tracked_object 的重载 (零拷贝)
+    auto cv_ptr = cv_bridge::toCvShare(msg->image, msg, sensor_msgs::image_encodings::BGR8);
     bgr = cv_ptr->image;
   } catch (const cv_bridge::Exception& e) {
     RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
@@ -204,17 +207,35 @@ void BuildingSpotDetector::process_and_publish(
   auto results = detect(bgr, cam_name);
 
   // ── 3. 发布每个检测结果 ──
+  //   ⚠️ 发布前必须把角点/中心从 letterbox 坐标反算回**原图坐标**（2026-09-20, P0-3）
+  //   detect() 的输入是预处理后的 letterbox 图。角点和中心**全是位置量** →
+  //   统一用 letterbox_to_orig_xy（减填充偏移 + 除 scale）。
   for (const auto& r : results) {
     br_perception::msg::CameraBuildingSpot out_msg;
     out_msg.camera_id  = camera_id;
     out_msg.detected   = r.detected;
-    out_msg.u0 = r.corners[0].x; out_msg.v0 = r.corners[0].y;
-    out_msg.u1 = r.corners[1].x; out_msg.v1 = r.corners[1].y;
-    out_msg.u2 = r.corners[2].x; out_msg.v2 = r.corners[2].y;
-    out_msg.u3 = r.corners[3].x; out_msg.v3 = r.corners[3].y;
-    out_msg.center_u = r.center.x;
-    out_msg.center_v = r.center.y;
+
+    // 四个角点：逐个反算（函数签名是两个引用，所以一个一个来）
+    float cu[4], cv[4];
+    for (int k = 0; k < 4; ++k) {
+      double x = r.corners[k].x, y = r.corners[k].y;
+      letterbox_to_orig_xy(msg->scale, msg->pad_x, msg->pad_y, x, y);
+      cu[k] = static_cast<float>(x);
+      cv[k] = static_cast<float>(y);
+    }
+    out_msg.u0 = cu[0]; out_msg.v0 = cv[0];
+    out_msg.u1 = cu[1]; out_msg.v1 = cv[1];
+    out_msg.u2 = cu[2]; out_msg.v2 = cv[2];
+    out_msg.u3 = cu[3]; out_msg.v3 = cv[3];
+
+    // 中心点
+    double cx = r.center.x, cy = r.center.y;
+    letterbox_to_orig_xy(msg->scale, msg->pad_x, msg->pad_y, cx, cy);
+    out_msg.center_u = static_cast<float>(cx);
+    out_msg.center_v = static_cast<float>(cy);
+
     out_msg.confidence = r.confidence;
+    out_msg.header     = msg->header;   // ⚠️ 曝光时刻, 禁止 now()
     pub->publish(out_msg);
   }
 
@@ -223,14 +244,15 @@ void BuildingSpotDetector::process_and_publish(
     br_perception::msg::CameraBuildingSpot out_msg;
     out_msg.camera_id = camera_id;
     out_msg.detected  = false;
+    out_msg.header    = msg->header;
     pub->publish(out_msg);
   }
 
   // ── 4. 更新状态 ──
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
-    if (camera_id == 0) front_spot_count_ = static_cast<int>(results.size());
-    else                rear_spot_count_  = static_cast<int>(results.size());
+    if (camera_id == 0) wide_spot_count_ = static_cast<int>(results.size());
+    else                tele_spot_count_  = static_cast<int>(results.size());
   }
 
   // ── 5. 诊断 ──
@@ -627,7 +649,7 @@ void BuildingSpotDetector::publish_diagnostics(
     int image_w, int image_h)
 {
   std::lock_guard<std::mutex> lock(diag_mutex_);
-  const char* cam_name = (camera_id == 0) ? "front" : "rear";
+  const char* cam_name = (camera_id == 0) ? "wide" : "tele";
 
   diagnostic_msgs::msg::DiagnosticArray diag_array;
   diag_array.header.stamp = this->now();
@@ -658,7 +680,7 @@ void BuildingSpotDetector::publish_diagnostics(
   add("image_w", static_cast<double>(image_w));
   add("image_h", static_cast<double>(image_h));
   add("frame_seq", static_cast<double>(
-      (camera_id == 0) ? front_frame_seq_ : rear_frame_seq_));
+      (camera_id == 0) ? wide_frame_seq_ : tele_frame_seq_));
 
   if (!results.empty()) {
     add("best_confidence", static_cast<double>(results[0].confidence));

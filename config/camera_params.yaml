@@ -1,132 +1,171 @@
 # ═══════════════════════════════════════════════════════════════════════════
-# 相机参数配置 — ROBOCON 2027
-# 硬件: 深圳康拓斯安全有限公司 技彩工业相机 ×2（前向 / 后向）
-# 使用方式: ros2 launch br_perception camera_perception.launch.py
+# 相机参数配置 — ROBOCON 2027  (任务书 v1.7 §1.3)
+# 硬件: JR H200S ×2（识别主力, 一宽一长焦, 勿组双目）+ Intel RealSense D435i ×1（近距深度）
 #
-# 说明:
-#   - 内参(intrinsics): 标定后填入实际值，当前为参考模板
-#   - 外参(extrinsics): 描述相机相对于雷达坐标系(或 base_link)的位姿变换
-#   - 曝光(exposure):  手动固定模式，避免自动曝光导致检测结果漂移
-#   - ROI:            仅处理场地相关区域以降低计算量
+# ⚠️ 2026-09-20 重构（原文件的结构是**读不到的**）:
+#   旧版按 `camera_front:` / `camera_rear:` 分块, 但 4 个检测节点读的是
+#   **自己节点名下的平铺参数** —— 两边的名字对不上, 结果整份配置**从来没被加载过**,
+#   所有检测器一直跑代码里的硬编码默认值。
+#   现在按**实际节点名**分块 (image_preprocessor / building_spot_detector /
+#   mustika_detector / pillar_detector), 与各自的 declare_parameter 逐一对齐。
+#
+# 校验方式: 每个节点 declare_parameter 的名字都能在本文件里找到同名键。
 # ═══════════════════════════════════════════════════════════════════════════
 
-/**:
+# ═════════════════════════════════════════════════════════════════════════════
+# 1. 图像预处理 (image_preprocessor)
+# ═════════════════════════════════════════════════════════════════════════════
+image_preprocessor:
   ros__parameters:
+    # 网络输入尺寸 (与训练/导出时一致)
+    #   ⚠️ 640×384 是按"相机 1280×720 (16:9)"推的。**先量真实相机再定死** ——
+    #      取 640 ÷ 宽高比 后向上对齐 32。见 doc/模型训练指南.md §1。
+    model_input_w: 640
+    model_input_h: 384
+    # ROI 裁剪 [x, y, w, h]（像素）—— 只处理场地相关区域以降低计算量
+    wide_roi: [0, 0, 1280, 720]
+    tele_roi:  [0, 0, 1280, 720]
 
-    # ═════════════════════════════════════════════════════════════════════════
-    # 前向相机 (camera_front)
-    # ═════════════════════════════════════════════════════════════════════════
-    camera_front:
+    # ── 归一化 ──
+    # ⚠️⚠️ **必须保持 false**（2026-09-21 实测踩过坑）
+    #
+    #   这条话题 `/perception/camera_wide/preprocessed` 是**一发布多订阅**：
+    #   4 个检测器（mustika / pillar / building_spot）都在订阅它。
+    #   **编码一变，所有订阅者都得跟着变** —— 而它们做的是传统 CV（HSV/轮廓），
+    #   **必须吃 uint8**。
+    #
+    #   2026-09-20 曾把它打开成 true，想给 ONNX 喂 0–1 float32。后果：
+    #     · 本节点输出 32FC3 (float32)
+    #     · 检测器 `toCvShare(msg->image, BGR8)` **转不了 float32 → 抛异常**
+    #     · 整条相机链路一帧都收不到（VM 实测）
+    #
+    #   **归一化是模型专属的事，不属于共享预处理。** 将来写 YOLO 检测器时，
+    #   由**它自己**在推理前做 `convertTo(CV_32F, 1.0/255.0)`。
+    #
+    #   下面两个数组保留，只为万一要开时有个地方配 —— 开之前先想清楚订阅者。
+    enable_normalize: false
+    norm_mean: [0.0, 0.0, 0.0]
+    norm_std:  [1.0, 1.0, 1.0]
 
-      # ── 内参（标定后填入实际值）──
-      intrinsics:
-        # 内参矩阵 K (3×3, 行主序)
-        # K = [fx,  0, cx,
-        #       0, fy, cy,
-        #       0,  0,  1]
-        camera_matrix: [800.0, 0.0, 640.0,   # fx, 0, cx
-                        0.0, 800.0, 360.0,   # 0, fy, cy
-                        0.0, 0.0, 1.0]       # 0,  0,  1
+    # ── 曝光补偿 (V 通道直方图拉伸) ──
+    # ⚠️ 默认 false: Ultralytics 训练时不做这一步, 推理侧开着会造成训练/推理分布错配。
+    #    要开的话, **训练数据也必须过同一套 compensate_exposure**, 否则不如不开。
+    exposure_compensation_enabled: false
 
-        # 畸变模型: "plumb_bob" (radial-tangential) / "fisheye" / "rational_polynomial"
-        distortion_model: "plumb_bob"
+    # 宽角相机 CLAHE (对抗赛场光照突变; 见 v1.7 §3.1)
+    # ⚠️ 同理: 开了就要在训练数据上也做, 否则是分布错配。
+    wide_clahe_enabled: true
+    wide_clahe_clip: 2.0
+    wide_clahe_tile: 8
+    # 长焦相机 CLAHE
+    tele_clahe_enabled: true
+    tele_clahe_clip: 2.0
+    tele_clahe_tile: 8
 
-        # 畸变系数 [k1, k2, p1, p2, k3]（标定后填入）
-        distortion_coeffs: [0.0, 0.0, 0.0, 0.0, 0.0]
+# ═════════════════════════════════════════════════════════════════════════════
+# 2. 建筑位检测 (building_spot_detector) — 绿色方格 HSV + 轮廓
+# ═════════════════════════════════════════════════════════════════════════════
+building_spot_detector:
+  ros__parameters:
+    color_yaml_path: "config/color_thresholds.yaml"
+    morph_close_kernel: 5
+    morph_close_iters: 1
+    approx_epsilon_factor: 0.03      # 多边形近似的 epsilon 系数 (× 周长)
+    contour_min_area: 200            # 轮廓面积下限 (px²)
+    contour_max_area: 80000
+    min_green_ratio: 0.70            # 框内绿色像素占比下限
+    min_convexity: 0.88              # 凸度下限
+    min_angle_score: 0.80            # 直角评分下限 (建筑位是方格)
+    min_side_score: 0.70             # 边长一致性评分下限
+    spot_real_size: 0.500            # 建筑位真实边长 (m) —— 规则 500×500
+    focal_length_px: 600.0           # 近似焦距 (px); ⚠ 相机标定后回填
+    min_distance: 0.3                # 有效检测距离 (m)
+    max_distance: 5.0
+    pnp_verify_enabled: false        # 是否用 PnP 复核位姿 (需相机内参)
 
-      # ── 外参: 相机 → 雷达坐标系 (或 base_link) ──
-      # 变换顺序: R (旋转) 后 T (平移)
-      # 即 P_world = R * P_camera + T
-      extrinsics:
-        # 旋转矩阵 (3×3, 行主序)，当前为单位矩阵
-        rotation: [1.0, 0.0, 0.0,
-                   0.0, 1.0, 0.0,
-                   0.0, 0.0, 1.0]
-        # 平移向量 [x, y, z] (m)，相机光心在雷达坐标系下的坐标
-        translation: [0.15, 0.0, 0.35]
+# ═════════════════════════════════════════════════════════════════════════════
+# 3. 穆斯蒂卡检测 (mustika_detector) — 排球: 黄底 + HoughCircles
+#    ✅ 2026-09-20 按 v1.1 一手原文: 实物 = Mikasa V300W 排球 (黄底+蓝纹+白字 Ø≈210)
+# ═════════════════════════════════════════════════════════════════════════════
+mustika_detector:
+  ros__parameters:
+    color_yaml_path: "config/color_thresholds.yaml"
+    morph_close_kernel: 5
+    morph_close_iters: 2
+    # ── HoughCircles ──
+    hough_dp: 1.0
+    hough_min_dist: 30.0             # 圆心最小间距 (px)
+    hough_param1: 100.0              # Canny 高阈值
+    hough_param2: 30.0               # 圆心累加器阈值
+    hough_min_radius: 10
+    hough_max_radius: 150
+    # ── 球面验证 (v1.6 修订值: 球坐在 Ø180 凹槽里只有上半可见) ──
+    min_golden_ratio: 0.50           # 圆内黄底占比下限 (原 0.60, 排球有蓝纹白字)
+    min_circularity: 0.70            # 圆形度下限 (原 0.85, 凹槽遮挡下判掉真球)
+    contour_min_area: 50
+    contour_min_golden_ratio: 0.40   # fallback 轮廓路径的黄底占比放宽
+    # ── 相机/距离 ──
+    focal_length_px: 600.0           # ⚠ 相机标定后回填
+    mustika_real_radius: 0.105       # 排球真实半径 (m) = Ø210/2 —— 决定 Hough 半径搜索窗
+    min_distance: 0.2                # 有效检测距离 (m)
+    max_distance: 3.0
 
-        # 参考坐标系: "lidar" / "base_link"
-        parent_frame: "lidar"
+# ═════════════════════════════════════════════════════════════════════════════
+# 4. 柱子检测 (pillar_detector) — 深绿/棕色竖直矩形
+# ═════════════════════════════════════════════════════════════════════════════
+pillar_detector:
+  ros__parameters:
+    color_yaml_path: "config/color_thresholds.yaml"
+    morph_close_kernel: 7
+    morph_close_iters: 2
+    min_aspect_ratio: 3.0            # 高/宽 比下限 (柱子是竖直长条)
+    max_aspect_ratio: 12.0
+    contour_min_area: 300
+    contour_max_area: 60000
+    min_color_fill: 0.55             # 框内目标色占比下限
+    max_upright_angle: 15.0          # 允许的倾斜角 (°)
+    top_check_offset: 0.10           # 柱顶检查区相对柱高的偏移 (归一化)
+    top_object_threshold: 0.30       # 柱顶判定"有物体"的占比阈值
+    # ── 真实尺寸 (m) —— 场地唯一事实源是 field_geometry.yaml, 这里供 PnP/测距 ──
+    pillar_diameter: 0.270           # 两柱均 Ø270
+    mustika_pillar_height: 0.500     # 地面柱 高 500
+    core_pillar_height: 0.800        # L2 核心柱 高 800
+    focal_length_px: 600.0           # ⚠ 相机标定后回填
 
-      # ── 图像参数 ──
-      resolution: [1280, 720]       # 像素 [width, height]
-      fps: 30.0                     # 帧率 (Hz)
-      pixel_format: "BGR8"          # 像素编码: "BGR8" / "RGB8" / "MONO8" / "YUV422"
+# ═════════════════════════════════════════════════════════════════════════════════
+# 5. D435i 深度辅助 (camera_depth) —— 任务书 §3.0 三相机并行
+#    只出深度, 不跑 YOLO。给一个目标 ROI → 回该处的鲁棒深度。
+#    ⚠️ 本节点**不依赖任何外参标定**(只输出相机系下的量);
+#       也**不读 color_thresholds.yaml**(它不做颜色)。
+# ═════════════════════════════════════════════════════════════════════════════════
+camera_depth:
+  ros__parameters:
+    # ── 话题 ──
+    depth_topic: "/camera/depth/image_rect_raw"   # realsense2_camera 的默认深度话题
+    roi_topic:   "/camera/depth/target_roi"       # 上层给的目标 ROI (sensor_msgs/RegionOfInterest)
+                                                  #   ⚠️ 这是进 MEASURE 模式的**唯一入口**;
+                                                  #      谁有 TF + 跨相机外参谁去算 ROI
 
-      # ── 曝光控制（手动固定，禁止自动曝光漂移）──
-      exposure_mode: "manual"       # "manual" / "auto" / "aperture_priority"
-      exposure_time: 5000           # 手动曝光时间 (μs)，室内场地质检值
-      gain: 0.0                     # 模拟增益 (dB)，0=无增益
-      auto_exposure_roi: [320, 180, 640, 360]  # 自动曝光测光区域 [x, y, w, h]，仅 auto 模式有效
+    # ── 深度解码 ──
+    depth_scale_m: 0.001          # 16UC1 的换算 (默认 mm → m); 32FC1 不用这个值
 
-      # ── 白平衡 ──
-      white_balance_mode: "manual"  # "manual" / "auto" / "once"
-      white_balance_red: 1.5        # 红色通道增益
-      white_balance_blue: 1.5       # 蓝色通道增益
+    # ── 有效深度范围与健康判据 ──
+    depth_min_m: 0.10             # 近于此视为无效 (噪声)
+    depth_max_m: 10.0             # 远于此视为无效 (D435i 量程上界)
+    valid_ratio_min: 0.10         # 有效像素占比低于此 → valid=false
 
-      # ── ROI 裁剪（仅处理场地相关区域，降低检测计算量）──
-      # 坐标定义: [x, y, width, height]，原点为图像左上角
-      # 空列表 [] 表示不启用裁剪
-      roi: [0, 0, 1280, 720]
+    # ── 「最近的显著深度簇」的判据 ──
+    hist_bin_m: 0.05              # 深度直方图 bin 宽 (m)
+    min_cluster_px: 30            # 成簇最小像素数 —— ⚠️ 挡飞点/反光靠这个:
+                                  #   单个飞点凑不满 → 被跳过
 
-    # ═════════════════════════════════════════════════════════════════════════
-    # 后向相机 (camera_rear) — 结构与前向相机完全对称
-    # ═════════════════════════════════════════════════════════════════════════
-    camera_rear:
+    # ── 模式与节流 ──
+    roi_timeout_sec: 0.5          # 多久没收到新 ROI 就退回 IDLE
+    diag_rate_hz: 1.0             # 诊断发布频率 (不是每帧)
+    stream_timeout_sec: 1.0       # 多久没帧判"深度流断了"并报 ERROR 诊断
+                                  #   ⚠️ 会被下限抬到 >= 1/diag_rate_hz
 
-      # ── 内参（标定后填入实际值）──
-      intrinsics:
-        camera_matrix: [800.0, 0.0, 640.0,
-                        0.0, 800.0, 360.0,
-                        0.0, 0.0, 1.0]
-        distortion_model: "plumb_bob"
-        distortion_coeffs: [0.0, 0.0, 0.0, 0.0, 0.0]
-
-      # ── 外参: 后向相机 → 雷达坐标系 ──
-      extrinsics:
-        rotation: [-1.0, 0.0, 0.0,
-                    0.0, 1.0, 0.0,
-                    0.0, 0.0, -1.0]     # 后向: Y 轴不变，X/Z 反向
-        translation: [-0.15, 0.0, 0.35]
-        parent_frame: "lidar"
-
-      # ── 图像参数 ──
-      resolution: [1280, 720]
-      fps: 30.0
-      pixel_format: "BGR8"
-
-      # ── 曝光控制 ──
-      exposure_mode: "manual"
-      exposure_time: 5000
-      gain: 0.0
-      auto_exposure_roi: [320, 180, 640, 360]
-
-      # ── 白平衡 ──
-      white_balance_mode: "manual"
-      white_balance_red: 1.5
-      white_balance_blue: 1.5
-
-      # ── ROI 裁剪 ──
-      roi: [0, 0, 1280, 720]
-
-    # ═════════════════════════════════════════════════════════════════════════
-    # 神经网络推理参数
-    # ═════════════════════════════════════════════════════════════════════════
-    model_input_size: [640, 384]           # 网络输入分辨率 [width, height]
-    model_confidence_threshold: 0.5        # 检测置信度阈值 (低于此值的检测结果被丢弃)
-    model_nms_threshold: 0.45              # NMS IoU 阈值 (非极大值抑制)
-
-    # ── 模型文件路径 ──
-    model_path: ""                         # ONNX / TensorRT 模型路径，空字符串表示使用默认路径
-    model_backend: "onnxruntime"           # 推理后端: "onnxruntime" / "tensorrt" / "openvino"
-
-    # ── GPU 加速 ──
-    enable_cuda: true                      # 是否启用 CUDA 加速
-    cuda_device_id: 0                      # CUDA 设备序号
-
-    # ═════════════════════════════════════════════════════════════════════════
-    # 双目/多相机同步
-    # ═════════════════════════════════════════════════════════════════════════
-    enable_stereo: false                   # 是否启用双目立体匹配（当前为独立双单目）
-    camera_sync_tolerance_ms: 5.0          # 两相机时间戳同步容差 (ms)
-    use_hardware_trigger: true             # 是否使用硬件触发同步（工业相机通常支持）
+# ═══════════════════════════════════════════════════════════════════════════════
+# 相机硬件规格（内外参 / 分辨率 / 曝光）已拆到 **config/camera_hardware.yaml**
+#   —— 那些不是 ROS 节点参数, 留在这里会让整份文件加载失败 (2026-09-21)
+# ═══════════════════════════════════════════════════════════════════════════════

@@ -45,8 +45,8 @@ struct TransformerParams {
   std::string odom_frame{"odom"};
   std::string base_frame{"base_link"};
   std::string lidar_frame{"livox_frame"};
-  std::string camera_front_frame{"camera_front_frame"};
-  std::string camera_rear_frame{"camera_rear_frame"};
+  std::string camera_wide_frame{"camera_wide_frame"};
+  std::string camera_tele_frame{"camera_tele_frame"};
 
   // ── 输入话题 ──
   /// Point-LIO (ROS2 移植版) 里程计话题 — 注意该移植版发的是 /aft_mapped_to_init, 不是 /Odometry
@@ -81,7 +81,7 @@ struct TransformerParams {
 // TF 树 (§4.1):
 //   world ← odom            (位姿校正 / BR_RESET 注入, 本模块广播)
 //   odom  ← base_link       (Point-LIO 里程计, 本模块转播)
-//   base_link ← livox_frame / camera_front_frame / camera_rear_frame
+//   base_link ← livox_frame / camera_wide_frame / camera_tele_frame
 //                           (静态安装外参, 由 bringup 的 static_transform_publisher 提供)
 //
 // 职责:

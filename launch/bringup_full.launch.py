@@ -116,19 +116,19 @@ def generate_launch_description():
                    '--roll', '0.0', '--pitch', '0.0', '--yaw', '0.0',
                    '--frame-id', 'base_link', '--child-frame-id', 'livox_frame'])
 
-    static_tf_cam_front = Node(
+    static_tf_cam_wide = Node(
         package='tf2_ros', executable='static_transform_publisher',
-        name='static_tf_base_to_camera_front',
+        name='static_tf_base_to_camera_wide',
         arguments=['--x', '0.15', '--y', '0.0', '--z', '0.35',     # ⚠ 占位
                    '--roll', '0.0', '--pitch', '0.0', '--yaw', '0.0',
-                   '--frame-id', 'base_link', '--child-frame-id', 'camera_front_frame'])
+                   '--frame-id', 'base_link', '--child-frame-id', 'camera_wide_frame'])
 
-    static_tf_cam_rear = Node(
+    static_tf_cam_tele = Node(
         package='tf2_ros', executable='static_transform_publisher',
-        name='static_tf_base_to_camera_rear',
+        name='static_tf_base_to_camera_tele',
         arguments=['--x', '-0.15', '--y', '0.0', '--z', '0.35',    # ⚠ 占位
                    '--roll', '0.0', '--pitch', '0.0', '--yaw', '3.14159',
-                   '--frame-id', 'base_link', '--child-frame-id', 'camera_rear_frame'])
+                   '--frame-id', 'base_link', '--child-frame-id', 'camera_tele_frame'])
 
     # ── 5. 雷达感知管线 (现有实现: 预处理→地面→圆柱→聚类→建筑位) ──
     #    直接起主节点, 不复用 lidar_perception.launch.py — 那个 launch 会发
@@ -159,8 +159,8 @@ def generate_launch_description():
         lio_arg,
         LogInfo(msg="[br_perception] 比赛模式启动 — §10.1 (里程计: Point-LIO 纯里程计 + 场地先验)"),
         static_tf_livox,
-        static_tf_cam_front,
-        static_tf_cam_rear,
+        static_tf_cam_wide,
+        static_tf_cam_tele,
         livox_driver,
         point_lio,
         custom_to_pcl2,

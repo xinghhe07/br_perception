@@ -19,6 +19,8 @@
 
 #include "br_perception/camera/mustika_detector.hpp"
 #include "br_perception/vision/color_utils.hpp"
+// letterbox_to_orig() —— 检测框反算回原图坐标 (2026-09-20, P0-3)
+#include "br_perception/camera/image_preprocessor.hpp"
 
 #include <cv_bridge/cv_bridge.h>
 
@@ -97,8 +99,6 @@ MustikaDetector::MustikaDetector(const rclcpp::NodeOptions& options)
   hough_min_dist_     = std::max(5.0, std::min(hough_min_dist_, 500.0));
   hough_param1_       = std::max(10.0, std::min(hough_param1_, 500.0));
   hough_param2_       = std::max(5.0, std::min(hough_param2_, 300.0));
-  hough_min_radius_   = std::max(3, std::min(hough_min_radius_, 500));
-  hough_max_radius_   = std::max(hough_min_radius_ + 1, std::min(hough_max_radius_, 1000));
   min_golden_ratio_   = std::max(0.1, std::min(min_golden_ratio_, 1.0));
   min_circularity_    = std::max(0.1, std::min(min_circularity_, 1.0));
   contour_min_area_   = std::max(10, contour_min_area_);
@@ -107,10 +107,35 @@ MustikaDetector::MustikaDetector(const rclcpp::NodeOptions& options)
   min_distance_       = std::max(0.05, min_distance_);
   max_distance_       = std::max(min_distance_ + 0.1, max_distance_);
 
-  // ── 加载金色 HSV 阈值 ──
+  // ── 半径搜索窗：**从距离派生**（2026-09-20 修）──
+  //   针孔模型 r_px = focal_length_px_ × mustika_real_radius_ / d
+  //     · 最近的球 (min_distance_) → 最大像素半径 → hough_max_radius_
+  //     · 最远的球 (max_distance_) → 最小像素半径 → hough_min_radius_
+  //
+  //   ⚠️ 旧实现让这两个值**各写各的**：min=10 / max=150 等价于 6.3m ~ 0.42m，
+  //      而 min_distance_ 声明的是 0.2m（需要 315px）——
+  //      **球在 0.42m 以内时 HoughCircles 直接框不到，静默返回 detected=false。**
+  //      而那正是"把球放到柱顶凹槽"那个动作的距离。
+  //
+  //   ⚠️ 放在 min_distance_ / max_distance_ **规范化之后** —— 否则会拿脏值派生。
+  //   ⚠️ 用 ceil/floor 把区间**向外取整**，宁可窗略宽（多几个候选给验证层筛），
+  //      也不能因为取整把真球的半径挤出窗外。
+  hough_max_radius_ = static_cast<int>(std::ceil(
+      focal_length_px_ * mustika_real_radius_ / min_distance_));
+  hough_min_radius_ = static_cast<int>(std::floor(
+      focal_length_px_ * mustika_real_radius_ / max_distance_));
+  // 兜底：下界至少 3px、上界至少比下界大 1（OpenCV 会拒绝退化窗口）
+  hough_min_radius_ = std::max(3, hough_min_radius_);
+  hough_max_radius_ = std::max(hough_min_radius_ + 1, hough_max_radius_);
+
+  // ── 加载黄底 HSV 阈值 ──
+  // ✅ 2026-09-20: 键名 golden_mustika → yellow_ball。
+  //    官方 v1.1 第 10 页写明实物是 Mikasa V300W **排球**(黄底+蓝纹+白字),
+  //    不是金色球; 相应配置项见 color_thresholds.yaml 的 yellow_ball /
+  //    blue_mark / white_mark + yellow_min_pixel_ratio / circularity_threshold。
   try {
     auto all_thresholds = br_perception::vision::load_color_thresholds(color_yaml_path_);
-    auto it = all_thresholds.find("golden_mustika");
+    auto it = all_thresholds.find("yellow_ball");
     if (it != all_thresholds.end()) {
       for (const auto& group : it->second.groups) {
         HsvGroup hg;
@@ -119,20 +144,20 @@ MustikaDetector::MustikaDetector(const rclcpp::NodeOptions& options)
         golden_groups_.push_back(hg);
       }
       RCLCPP_INFO(this->get_logger(),
-        "Loaded %zu golden HSV groups from %s",
+        "Loaded %zu yellow HSV groups from %s (v1.1 volleyball model)",
         golden_groups_.size(), color_yaml_path_.c_str());
     } else {
-      // ── 硬编码 fallback: 金色 H: 18-35, S: 80-255, V: 60-255 ──
+      // ── 硬编码 fallback: 排球黄底 H: 20-50, S: 60-255, V: 100-255 ──
       RCLCPP_WARN(this->get_logger(),
-        "No 'golden_mustika' key in %s, using hardcoded thresholds",
+        "No 'yellow_ball' key in %s, using hardcoded thresholds",
         color_yaml_path_.c_str());
       golden_groups_.push_back({
-        cv::Scalar(18, 80,  60),
-        cv::Scalar(35, 255, 255)
+        cv::Scalar(20, 60,  100),
+        cv::Scalar(50, 255, 255)
       });
       golden_groups_.push_back({
-        cv::Scalar(15, 50,  50),
-        cv::Scalar(38, 255, 230)
+        cv::Scalar(18, 50,  80),
+        cv::Scalar(55, 255, 230)
       });
     }
   } catch (const std::exception& e) {
@@ -140,12 +165,12 @@ MustikaDetector::MustikaDetector(const rclcpp::NodeOptions& options)
       "Failed to load color YAML (%s), using hardcoded thresholds: %s",
       color_yaml_path_.c_str(), e.what());
     golden_groups_.push_back({
-      cv::Scalar(18, 80,  60),
-      cv::Scalar(35, 255, 255)
+      cv::Scalar(20, 60,  100),
+      cv::Scalar(50, 255, 255)
     });
     golden_groups_.push_back({
-      cv::Scalar(15, 50,  50),
-      cv::Scalar(38, 255, 230)
+      cv::Scalar(18, 50,  80),
+      cv::Scalar(55, 255, 230)
     });
   }
 
@@ -155,19 +180,19 @@ MustikaDetector::MustikaDetector(const rclcpp::NodeOptions& options)
 
   // ── 订阅预处理图像 (前/后双路) ──
   // ⚠ 与 image_preprocessor 的发布端保持同为 BEST_EFFORT (SensorDataQoS), 两侧一起改
-  sub_front_ = this->create_subscription<sensor_msgs::msg::Image>(
-    "/perception/camera_front/preprocessed", rclcpp::SensorDataQoS(),
-    std::bind(&MustikaDetector::front_callback, this, std::placeholders::_1));
+  sub_wide_ = this->create_subscription<br_perception::msg::PreprocessedImage>(
+    "/perception/camera_wide/preprocessed", rclcpp::SensorDataQoS(),
+    std::bind(&MustikaDetector::wide_callback, this, std::placeholders::_1));
 
-  sub_rear_ = this->create_subscription<sensor_msgs::msg::Image>(
-    "/perception/camera_rear/preprocessed", rclcpp::SensorDataQoS(),
-    std::bind(&MustikaDetector::rear_callback, this, std::placeholders::_1));
+  sub_tele_ = this->create_subscription<br_perception::msg::PreprocessedImage>(
+    "/perception/camera_tele/preprocessed", rclcpp::SensorDataQoS(),
+    std::bind(&MustikaDetector::tele_callback, this, std::placeholders::_1));
 
   // ── 发布穆斯蒂卡检测结果 ──
-  pub_front_ = this->create_publisher<br_perception::msg::CameraMustika>(
-    "/perception/camera/mustika_front", rclcpp::SensorDataQoS());
-  pub_rear_ = this->create_publisher<br_perception::msg::CameraMustika>(
-    "/perception/camera/mustika_rear", rclcpp::SensorDataQoS());
+  pub_wide_ = this->create_publisher<br_perception::msg::CameraMustika>(
+    "/perception/camera/mustika_wide", rclcpp::SensorDataQoS());
+  pub_tele_ = this->create_publisher<br_perception::msg::CameraMustika>(
+    "/perception/camera/mustika_tele", rclcpp::SensorDataQoS());
 
   // ── 诊断 ──
   pub_diagnostics_ = this->create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
@@ -190,30 +215,30 @@ MustikaDetector::MustikaDetector(const rclcpp::NodeOptions& options)
 // ═══════════════════════════════════════════════════════════════════════════════
 // 前向相机回调
 // ═══════════════════════════════════════════════════════════════════════════════
-void MustikaDetector::front_callback(const sensor_msgs::msg::Image::SharedPtr msg)
+void MustikaDetector::wide_callback(const br_perception::msg::PreprocessedImage::SharedPtr msg)
 {
-  process_and_publish(msg, 0, pub_front_);
-  front_frame_seq_++;
+  process_and_publish(msg, 0, pub_wide_);
+  wide_frame_seq_++;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 后向相机回调
 // ═══════════════════════════════════════════════════════════════════════════════
-void MustikaDetector::rear_callback(const sensor_msgs::msg::Image::SharedPtr msg)
+void MustikaDetector::tele_callback(const br_perception::msg::PreprocessedImage::SharedPtr msg)
 {
-  process_and_publish(msg, 1, pub_rear_);
-  rear_frame_seq_++;
+  process_and_publish(msg, 1, pub_tele_);
+  tele_frame_seq_++;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 单路相机通用处理
 // ═══════════════════════════════════════════════════════════════════════════════
 void MustikaDetector::process_and_publish(
-    const sensor_msgs::msg::Image::SharedPtr msg,
+    const br_perception::msg::PreprocessedImage::SharedPtr msg,
     uint8_t camera_id,
     const rclcpp::Publisher<br_perception::msg::CameraMustika>::SharedPtr& pub)
 {
-  const char* cam_name = (camera_id == 0) ? "front" : "rear";
+  const char* cam_name = (camera_id == 0) ? "wide" : "tele";
 
   // ── 计时起点 ──
   auto t0 = std::chrono::steady_clock::now();
@@ -221,7 +246,11 @@ void MustikaDetector::process_and_publish(
   // ── 1. ROS Image → cv::Mat (BGR8) ──
   cv::Mat bgr;
   try {
-    auto cv_ptr = cv_bridge::toCvShare(msg, sensor_msgs::image_encodings::BGR8);
+    // msg->image 是 PreprocessedImage 的**内嵌字段**, 不是独立的 shared_ptr
+    //   → 用带 tracked_object 的重载 (cv_bridge.h 注明就是为"消息里包着 Image"准备的)。
+    //   数据生命周期由 msg 保证 (回调期间一直活着), 且**仍是零拷贝**。
+    //   ⚠️ 别图省事改成 toCvCopy —— 那会多一次整图 memcpy, 白扔预处理的一次拷贝。
+    auto cv_ptr = cv_bridge::toCvShare(msg->image, msg, sensor_msgs::image_encodings::BGR8);
     bgr = cv_ptr->image;
   } catch (const cv_bridge::Exception& e) {
     RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
@@ -239,20 +268,34 @@ void MustikaDetector::process_and_publish(
   MustikaImageResult result = detect(bgr, cam_name);
 
   // ── 3. 发布 CameraMustika 消息 ──
+  // ── 反算: letterbox 坐标 → 原图坐标（2026-09-20 新增, P0-3）──
+  //   detect() 输入的是预处理后的 letterbox 图, 所以 result.u/v/radius 都在
+  //   letterbox 坐标系里。**发出去之前必须反算回原图** —— 下游的 2D→3D 投影
+  //   用的是原图内参 K, 坐标不换会整体偏移 (近处看不出、远处错得离谱)。
+  //
+  //   ⚠️ **三个量都要换**。只换中心点、不换半径, 下游会拿到错误的尺寸
+  //      （半径只除 scale、不减填充偏移 —— 见 letterbox_to_orig 的实现）。
+  double u_orig = result.u;
+  double v_orig = result.v;
+  double r_orig = result.radius;
+  letterbox_to_orig(msg->scale, msg->pad_x, msg->pad_y, u_orig, v_orig, r_orig);
+
   br_perception::msg::CameraMustika out_msg;
   out_msg.camera_id  = camera_id;
-  out_msg.u          = result.u;
-  out_msg.v          = result.v;
-  out_msg.radius     = result.radius;
+  out_msg.u          = static_cast<float>(u_orig);
+  out_msg.v          = static_cast<float>(v_orig);
+  out_msg.radius     = static_cast<float>(r_orig);
   out_msg.confidence = result.confidence;
   out_msg.detected   = result.detected;
+  // ⚠️ 时间戳 = 曝光时刻, **从输入图继承**, 禁止用 now()（见任务书 §四 时间戳约定）
+  out_msg.header = msg->header;
   pub->publish(out_msg);
 
   // ── 4. 更新 "在视野中" 状态 ──
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
-    if (camera_id == 0) front_in_view_ = result.detected;
-    else                rear_in_view_  = result.detected;
+    if (camera_id == 0) wide_in_view_ = result.detected;
+    else                tele_in_view_  = result.detected;
   }
 
   // ── 5. 诊断 ──
@@ -308,14 +351,14 @@ MustikaDetector::detect(const cv::Mat& bgr, const std::string& cam_name)
     }
 
     if (best.detected) {
-      best.method = 1;  // HoughCircles
+      best.method = DetectMethod::HOUGH_CIRCLES;
       return best;
     }
   }
 
   // ── Step 4: Fallback — 轮廓 + minEnclosingCircle ──
   if (fallback_contour_detect(mask, result)) {
-    result.method = 2;
+    result.method = DetectMethod::CONTOUR_FALLBACK;
     return result;
   }
 
@@ -472,7 +515,7 @@ bool MustikaDetector::validate_circle(
   result.confidence   = confidence;
   result.golden_ratio = golden_ratio;
   result.circularity  = best_circularity;
-  result.method       = 0;  // caller fills
+  result.method       = DetectMethod::NONE;  // caller fills
 
   return true;
 }
@@ -597,7 +640,7 @@ void MustikaDetector::publish_diagnostics(
 {
   std::lock_guard<std::mutex> lock(diag_mutex_);
 
-  const char* cam_name = (camera_id == 0) ? "front" : "rear";
+  const char* cam_name = (camera_id == 0) ? "wide" : "tele";
 
   diagnostic_msgs::msg::DiagnosticArray diag_array;
   diag_array.header.stamp = this->now();
@@ -633,17 +676,17 @@ void MustikaDetector::publish_diagnostics(
   add_kv("confidence",   static_cast<double>(result.confidence));
   add_kv("golden_ratio", static_cast<double>(result.golden_ratio));
   add_kv("circularity",  static_cast<double>(result.circularity));
-  add_kv("method",       static_cast<double>(result.method));
+  add_kv("method",       static_cast<double>(static_cast<uint8_t>(result.method)));
   add_kv("image_w",      static_cast<double>(image_w));
   add_kv("image_h",      static_cast<double>(image_h));
   add_kv("frame_seq",    static_cast<double>(
-      (camera_id == 0) ? front_frame_seq_ : rear_frame_seq_));
+      (camera_id == 0) ? wide_frame_seq_ : tele_frame_seq_));
 
   // 在视野中的状态 (前后任一)
   bool any_in_view = false;
   {
     std::lock_guard<std::mutex> slock(state_mutex_);
-    any_in_view = front_in_view_ || rear_in_view_;
+    any_in_view = wide_in_view_ || tele_in_view_;
   }
   add_kv("any_in_view", any_in_view ? 1.0 : 0.0);
 

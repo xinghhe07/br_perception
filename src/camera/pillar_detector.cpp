@@ -18,6 +18,8 @@
 /// ═══════════════════════════════════════════════════════════════════════════════
 
 #include "br_perception/camera/pillar_detector.hpp"
+// letterbox_to_orig() —— 检测框反算回原图坐标 (2026-09-20, P0-3)
+#include "br_perception/camera/image_preprocessor.hpp"
 #include "br_perception/vision/color_utils.hpp"
 
 #include <cv_bridge/cv_bridge.h>
@@ -132,17 +134,17 @@ PillarDetector::PillarDetector(const rclcpp::NodeOptions& options)
   param_callback_handle_ = this->add_on_set_parameters_callback(
     std::bind(&PillarDetector::on_parameter_change, this, std::placeholders::_1));
 
-  sub_front_ = this->create_subscription<sensor_msgs::msg::Image>(
-    "/perception/camera_front/preprocessed", rclcpp::SensorDataQoS(),
-    std::bind(&PillarDetector::front_callback, this, std::placeholders::_1));
-  sub_rear_ = this->create_subscription<sensor_msgs::msg::Image>(
-    "/perception/camera_rear/preprocessed", rclcpp::SensorDataQoS(),
-    std::bind(&PillarDetector::rear_callback, this, std::placeholders::_1));
+  sub_wide_ = this->create_subscription<br_perception::msg::PreprocessedImage>(
+    "/perception/camera_wide/preprocessed", rclcpp::SensorDataQoS(),
+    std::bind(&PillarDetector::wide_callback, this, std::placeholders::_1));
+  sub_tele_ = this->create_subscription<br_perception::msg::PreprocessedImage>(
+    "/perception/camera_tele/preprocessed", rclcpp::SensorDataQoS(),
+    std::bind(&PillarDetector::tele_callback, this, std::placeholders::_1));
 
-  pub_front_ = this->create_publisher<br_perception::msg::CameraPillar>(
-    "/perception/camera/pillars_front", rclcpp::SensorDataQoS());
-  pub_rear_ = this->create_publisher<br_perception::msg::CameraPillar>(
-    "/perception/camera/pillars_rear", rclcpp::SensorDataQoS());
+  pub_wide_ = this->create_publisher<br_perception::msg::CameraPillar>(
+    "/perception/camera/pillars_wide", rclcpp::SensorDataQoS());
+  pub_tele_ = this->create_publisher<br_perception::msg::CameraPillar>(
+    "/perception/camera/pillars_tele", rclcpp::SensorDataQoS());
 
   pub_diagnostics_ = this->create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
     "/perception/camera/pillar_diagnostics", 10);
@@ -161,26 +163,27 @@ PillarDetector::PillarDetector(const rclcpp::NodeOptions& options)
 // ═══════════════════════════════════════════════════════════════════════════════
 // 回调
 // ═══════════════════════════════════════════════════════════════════════════════
-void PillarDetector::front_callback(const sensor_msgs::msg::Image::SharedPtr msg)
-{ process_and_publish(msg, 0, pub_front_); front_frame_seq_++; }
+void PillarDetector::wide_callback(const br_perception::msg::PreprocessedImage::SharedPtr msg)
+{ process_and_publish(msg, 0, pub_wide_); wide_frame_seq_++; }
 
-void PillarDetector::rear_callback(const sensor_msgs::msg::Image::SharedPtr msg)
-{ process_and_publish(msg, 1, pub_rear_); rear_frame_seq_++; }
+void PillarDetector::tele_callback(const br_perception::msg::PreprocessedImage::SharedPtr msg)
+{ process_and_publish(msg, 1, pub_tele_); tele_frame_seq_++; }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 单路处理
 // ═══════════════════════════════════════════════════════════════════════════════
 void PillarDetector::process_and_publish(
-    const sensor_msgs::msg::Image::SharedPtr msg,
+    const br_perception::msg::PreprocessedImage::SharedPtr msg,
     uint8_t camera_id,
     const rclcpp::Publisher<br_perception::msg::CameraPillar>::SharedPtr& pub)
 {
-  const char* cam_name = (camera_id == 0) ? "front" : "rear";
+  const char* cam_name = (camera_id == 0) ? "wide" : "tele";
   auto t0 = std::chrono::steady_clock::now();
 
   cv::Mat bgr;
   try {
-    auto cv_ptr = cv_bridge::toCvShare(msg, sensor_msgs::image_encodings::BGR8);
+    // msg->image 是内嵌字段, 不是独立 shared_ptr → 带 tracked_object 的重载 (零拷贝)
+    auto cv_ptr = cv_bridge::toCvShare(msg->image, msg, sensor_msgs::image_encodings::BGR8);
     bgr = cv_ptr->image;
   } catch (const cv_bridge::Exception& e) {
     RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
@@ -191,18 +194,30 @@ void PillarDetector::process_and_publish(
 
   auto results = detect(bgr, cam_name);
 
-  // 发布
+  // 发布 —— ⚠️ 发布前必须把 bbox 从 letterbox 坐标反算回原图坐标（2026-09-20, P0-3）
+  //   detect() 的输入是预处理后的 letterbox 图, 所以 results 里的 bbox 都在那个坐标系。
+  //   下游的 2D→3D 投影用原图内参 K, 不反算会整体偏移。
   for (const auto& r : results) {
+    // 中心点: 既要减填充偏移、又要除 scale
+    double u = r.bbox.x + r.bbox.width * 0.5f;
+    double v = r.bbox.y + r.bbox.height * 0.5f;
+    // 宽高: **尺度量** —— 只除 scale, **不减填充偏移**（减了会算出负宽度）
+    double w = r.bbox.width;
+    double h = r.bbox.height;
+    letterbox_to_orig_xy(msg->scale, msg->pad_x, msg->pad_y, u, v);
+    letterbox_to_orig_size(msg->scale, w, h);
+
     br_perception::msg::CameraPillar out;
     out.camera_id     = camera_id;
     out.detected      = r.detected;
     out.pillar_type   = static_cast<uint8_t>(r.pillar_type);
-    out.u             = r.bbox.x + r.bbox.width * 0.5f;
-    out.v             = r.bbox.y + r.bbox.height * 0.5f;
-    out.width         = r.bbox.width;
-    out.height        = r.bbox.height;
+    out.u             = static_cast<float>(u);
+    out.v             = static_cast<float>(v);
+    out.width         = static_cast<float>(w);
+    out.height        = static_cast<float>(h);
     out.confidence    = r.confidence;
     out.has_top_object = r.top_has_object;
+    out.header        = msg->header;   // ⚠️ 曝光时刻, 禁止 now()
     pub->publish(out);
   }
 
@@ -210,13 +225,14 @@ void PillarDetector::process_and_publish(
     br_perception::msg::CameraPillar out;
     out.camera_id = camera_id;
     out.detected  = false;
+    out.header    = msg->header;
     pub->publish(out);
   }
 
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
-    if (camera_id == 0) front_pillar_count_ = static_cast<int>(results.size());
-    else                rear_pillar_count_  = static_cast<int>(results.size());
+    if (camera_id == 0) wide_pillar_count_ = static_cast<int>(results.size());
+    else                tele_pillar_count_  = static_cast<int>(results.size());
   }
 
   auto t1 = std::chrono::steady_clock::now();
@@ -506,7 +522,7 @@ void PillarDetector::publish_diagnostics(
     int image_w, int image_h)
 {
   std::lock_guard<std::mutex> lock(diag_mutex_);
-  const char* cam_name = (camera_id == 0) ? "front" : "rear";
+  const char* cam_name = (camera_id == 0) ? "wide" : "tele";
 
   diagnostic_msgs::msg::DiagnosticArray arr;
   arr.header.stamp = this->now();
@@ -529,7 +545,7 @@ void PillarDetector::publish_diagnostics(
   add("image_w", static_cast<double>(image_w));
   add("image_h", static_cast<double>(image_h));
   add("frame_seq", static_cast<double>(
-      (camera_id == 0) ? front_frame_seq_ : rear_frame_seq_));
+      (camera_id == 0) ? wide_frame_seq_ : tele_frame_seq_));
 
   int mc = 0, cc = 0, tc = 0;
   for (const auto& r : results) {

@@ -49,8 +49,12 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/CameraMustika.msg"
   "msg/CameraBuildingSpot.msg"
   "msg/CameraPillar.msg"
+  # 2026-09-20 新增: 预处理图 + letterbox 变换 (检测框反算用)
+  "msg/PreprocessedImage.msg"
+  # 2026-09-20 新增: D435i 深度辅助 (§3.0 三相机并行)
+  "msg/CameraDepth.msg"
   # std_msgs: PerceptionFrame 与 LidarResult 都用了 std_msgs/Header
-  DEPENDENCIES geometry_msgs std_msgs builtin_interfaces diagnostic_msgs
+  DEPENDENCIES geometry_msgs std_msgs builtin_interfaces diagnostic_msgs sensor_msgs
 )
 
 # 获取 C++ typesupport 链接目标（供组件库链接）
@@ -194,6 +198,19 @@ add_lidar_component(pillar_detector_component
 target_link_libraries(pillar_detector_component
   ${OpenCV_LIBRARIES}
   vision_utils
+  ${cpp_typesupport_target})
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 11b. CameraDepthNode — D435i 深度辅助 (§3.0 三相机并行)
+#      ⚠️ 只出深度, 不跑 YOLO。独立进程/独立回调, 不阻塞主感知链。
+# ═══════════════════════════════════════════════════════════════════════════
+add_lidar_component(camera_depth_component
+  src/camera/camera_depth_node.cpp
+  "br_perception::camera::CameraDepthNode"
+  camera_depth
+  rclcpp rclcpp_components sensor_msgs diagnostic_msgs cv_bridge)
+target_link_libraries(camera_depth_component
+  ${OpenCV_LIBRARIES}
   ${cpp_typesupport_target})
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -359,6 +376,7 @@ install(TARGETS
   mustika_detector
   building_spot_detector
   pillar_detector
+  camera_depth
   comm_node
   DESTINATION lib/${PROJECT_NAME})
 
@@ -375,6 +393,7 @@ install(TARGETS
   mustika_detector_component
   building_spot_detector_component
   pillar_detector_component
+  camera_depth_component
   coordinate_transformer
   common_utils
   communication

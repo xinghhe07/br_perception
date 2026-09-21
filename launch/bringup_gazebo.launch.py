@@ -7,7 +7,7 @@ Gazebo 仿真启动 — fishbot 载具 + Point-LIO (任务书 §4.1 / §十.2 �
     ├─ /livox/lidar/pointcloud (PointCloud2, 16线 10Hz) → pointcloud2_to_livox_custom
     │                                                       └→ /livox/lidar (CustomMsg) → Point-LIO
     ├─ /imu/data (100Hz)
-    ├─ /camera_front/image_raw, /camera_rear/image_raw (30Hz)
+    ├─ /camera_wide/image_raw, /camera_tele/image_raw (30Hz)
     └─ /odom ← 车的差速插件
   /cmd_vel → 车的差速插件驱动巡游 (scripts/sim_patrol.py)
 
@@ -71,8 +71,8 @@ def generate_launch_description():
     SENSOR_TF = [
         ('livox_frame',        0.0,   0.0, 0.2419, 0.0, 0.0, 0.0),
         ('imu_link',           0.0,   0.0, 0.1119, 0.0, 0.0, 0.0),
-        ('camera_front_frame', 0.1,   0.0, 0.1669, 0.0, 0.0, 0.0),
-        ('camera_rear_frame', -0.1,   0.0, 0.1669, 0.0, 0.0, 3.14159),
+        ('camera_wide_frame', 0.1,   0.0, 0.1669, 0.0, 0.0, 0.0),
+        ('camera_tele_frame', -0.1,   0.0, 0.1669, 0.0, 0.0, 3.14159),
         ('camera_depth_frame', 0.105, 0.0, 0.125,  0.0, 0.0, 0.0),
     ]
     static_tfs = [

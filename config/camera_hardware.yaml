@@ -1,0 +1,95 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# 相机硬件规格 — ROBOCON 2027
+# ===========================================================================
+# ⚠️ 2026-09-21 从 config/camera_params.yaml **拆出来**。
+#
+# 为什么拆: 这些是**硬件规格**（内外参 / 分辨率 / 曝光 / 型号），
+#   **不是 ROS 节点参数**。混在 params 文件里会让整份文件加载失败 ——
+#   ROS 2 要求每个顶层键都是节点名且带 `ros__parameters:`，
+#   而 `camera_wide:` / `camera_depth:` 这类没有，解析器直接报错。
+#
+# 谁读这个文件:
+#   · scripts/calibrate_camera.py       （读写内参）
+#   · scripts/calibrate_lidar_camera.py （写外参）
+#   · 相机驱动（外部）
+# 本包的节点**不读**它 —— 它们读 config/camera_params.yaml 的 1-4 节。
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 5. 相机硬件参数（**驱动层**，不由本包节点读取；标定结果写在这里）
+#    ⚠ 这一节给相机驱动 / 标定流程用。本包的 4 个检测节点读上面 1-4 节。
+# ═════════════════════════════════════════════════════════════════════════════
+camera_wide:
+  intrinsics:
+    # ⚠️ 当前是**占位值** (fx=800) —— 未经标定。标定: scripts/calibrate_camera.py
+    camera_matrix: [800.0, 0.0, 640.0,
+                    0.0, 800.0, 360.0,
+                    0.0, 0.0, 1.0]
+    distortion_model: "plumb_bob"
+    distortion_coeffs: [0.0, 0.0, 0.0, 0.0, 0.0]
+  extrinsics:
+    # 相机 → 雷达坐标系; P_world = R * P_camera + T
+    # ⚠️ 当前是**占位值** —— 未经标定。标定: scripts/calibrate_lidar_camera.py (Fast-Calib)
+    rotation: [1.0, 0.0, 0.0,
+               0.0, 1.0, 0.0,
+               0.0, 0.0, 1.0]
+    translation: [0.15, 0.0, 0.35]
+    parent_frame: "lidar"
+  resolution: [1280, 720]
+  fps: 30.0
+  pixel_format: "BGR8"
+  exposure_mode: "manual"            # 禁止自动曝光漂移（赛场光照会变）
+  exposure_time: 5000                # μs
+  gain: 0.0
+  white_balance_mode: "manual"
+  white_balance_red: 1.5
+  white_balance_blue: 1.5
+  roi: [0, 0, 1280, 720]
+
+camera_tele:
+  intrinsics:
+    camera_matrix: [800.0, 0.0, 640.0,
+                    0.0, 800.0, 360.0,
+                    0.0, 0.0, 1.0]
+    distortion_model: "plumb_bob"
+    distortion_coeffs: [0.0, 0.0, 0.0, 0.0, 0.0]
+  extrinsics:
+    rotation: [1.0, 0.0, 0.0,
+               0.0, 1.0, 0.0,
+               0.0, 0.0, 1.0]       # ⚠ 占位; 宽/长焦实际都是朝前, 待标定
+    translation: [-0.15, 0.0, 0.35]
+    parent_frame: "lidar"
+  resolution: [1280, 720]
+  fps: 30.0
+  pixel_format: "BGR8"
+  exposure_mode: "manual"
+  exposure_time: 5000
+  gain: 0.0
+  white_balance_mode: "manual"
+  white_balance_red: 1.5
+  white_balance_blue: 1.5
+  roi: [0, 0, 1280, 720]
+
+# ── 推理后端 ──
+model_backend: "onnxruntime"         # "onnxruntime" / "openvino"（AMD 上 OpenVINO 实测更快）
+model_path: ""
+
+# ── D435i (camera_depth) —— 近距深度辅助 ──
+#   2026-09-20 新增。角色: **只出深度**, 不跑 YOLO。
+#   ① 近距操作深度(0.3-1.0m, ±2% ≈ ±2~20mm) ② 塔高交叉验证 ③ 故障冗余
+#   ⚠️ 它的 RGB 是**卷帘快门(OV2740)**, 运动时有果冻形变 —— 所以不做识别主力;
+#      深度是全局快门(OV9282), 不受运动影响。
+#   内参出厂标定, 用 `rs-enumerate-devices -c` 直接读, **不需要跑标定脚本**。
+#   装位: 朝前下方俯 30-45°, 让 BR 前方 0.3-1.0m 的**夹爪工作区**落进视锥。
+camera_depth:
+  model: "Intel RealSense D435i"
+  role: "近距深度 / 交叉验证 / 冗余"
+  runs_yolo: false
+  mounting: "朝前下方俯 30-45°, 覆盖夹爪工作区"
+  topics:                        # realsense2_camera 的默认话题名
+    color: "/camera/color/image_raw"
+    depth: "/camera/depth/image_rect_raw"
+    imu:   "/camera/imu"
+    info:  "/camera/color/camera_info"
+  depth_range_m: [0.1, 10.0]     # 官方 0.1–10m @ ±2%
+  intrinsics_source: "factory"   # 出厂标定, 免标

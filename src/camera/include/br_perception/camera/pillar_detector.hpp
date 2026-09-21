@@ -23,6 +23,9 @@
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
 
 #include "br_perception/msg/camera_pillar.hpp"
+// ⚠️ 2026-09-20: 订阅类型改 PreprocessedImage —— 它带 letterbox 变换,
+//    检测框必须用它反算回原图坐标 (letterbox_to_orig 在 image_preprocessor.hpp)
+#include "br_perception/msg/preprocessed_image.hpp"
 
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
@@ -76,10 +79,10 @@ public:
 
 private:
   // ── ROS 回调 ──
-  void front_callback(const sensor_msgs::msg::Image::SharedPtr msg);
-  void rear_callback(const sensor_msgs::msg::Image::SharedPtr msg);
+  void wide_callback(const br_perception::msg::PreprocessedImage::SharedPtr msg);
+  void tele_callback(const br_perception::msg::PreprocessedImage::SharedPtr msg);
   void process_and_publish(
-      const sensor_msgs::msg::Image::SharedPtr msg,
+      const br_perception::msg::PreprocessedImage::SharedPtr msg,
       uint8_t camera_id,
       const rclcpp::Publisher<br_perception::msg::CameraPillar>::SharedPtr& pub);
 
@@ -129,11 +132,11 @@ private:
   // ═════════════════════════════════════════════════════════════════════════════
   // 订阅 & 发布
   // ═════════════════════════════════════════════════════════════════════════════
-  rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr sub_front_;
-  rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr sub_rear_;
+  rclcpp::Subscription<br_perception::msg::PreprocessedImage>::SharedPtr sub_wide_;
+  rclcpp::Subscription<br_perception::msg::PreprocessedImage>::SharedPtr sub_tele_;
 
-  rclcpp::Publisher<br_perception::msg::CameraPillar>::SharedPtr pub_front_;
-  rclcpp::Publisher<br_perception::msg::CameraPillar>::SharedPtr pub_rear_;
+  rclcpp::Publisher<br_perception::msg::CameraPillar>::SharedPtr pub_wide_;
+  rclcpp::Publisher<br_perception::msg::CameraPillar>::SharedPtr pub_tele_;
   rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr pub_diagnostics_;
 
   OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
@@ -174,12 +177,12 @@ private:
   // ═════════════════════════════════════════════════════════════════════════════
   // 运行时状态
   // ═════════════════════════════════════════════════════════════════════════════
-  int front_pillar_count_{0};
-  int rear_pillar_count_{0};
+  int wide_pillar_count_{0};
+  int tele_pillar_count_{0};
   std::mutex state_mutex_;
 
-  uint64_t front_frame_seq_{0};
-  uint64_t rear_frame_seq_{0};
+  uint64_t wide_frame_seq_{0};
+  uint64_t tele_frame_seq_{0};
   std::mutex diag_mutex_;
 };
 

@@ -37,7 +37,10 @@ DEFAULT_CONFIG = SCRIPT_DIR.parent / "config" / "color_thresholds.yaml"
 COLOR_NAMES = [
     "red_team",
     "blue_team",
-    "golden_mustika",
+    # ✅ 2026-09-20: golden_mustika → 排球三色 (v1.1: Mikasa V300W 黄底+蓝纹+白字)
+    "yellow_ball",
+    "blue_mark",
+    "white_mark",
     "dark_green_pillar",
     "brown_core_pillar",
     "green_building_spot",
@@ -62,7 +65,10 @@ def save_config(path, config):
     comments = {
         "red_team":            "# ── 红色队伍 (RGB: 223-34-34) ──",
         "blue_team":           "# ── 蓝色队伍 (RGB: 50-0-255) ──",
-        "golden_mustika":      "# ── 金色穆斯蒂卡 (RGB: 218-165-32) ──",
+        # ✅ 2026-09-20: 穆斯蒂卡按 v1.1 改正为排球(黄底+蓝纹+白字), 原 golden_mustika 作废
+        "yellow_ball":         "# ── 排球黄底 (主判据; Pantone 1235C 近似) ──",
+        "blue_mark":           "# ── 排球蓝纹 (容忍色, 不否决黄底) ──",
+        "white_mark":          "# ── 排球白字 (容忍色, 不否决黄底) ──",
         "dark_green_pillar":   "# ── 深绿色穆斯蒂卡柱 (RGB: 40-100-50) ──",
         "brown_core_pillar":   "# ── 棕色核心支柱 (RGB: 100-62-0) ──",
         "green_building_spot": "# ── 绿色建筑点位 (RGB: 40-100-50) ──",

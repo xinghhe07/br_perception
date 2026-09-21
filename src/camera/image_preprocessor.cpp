@@ -40,18 +40,23 @@ ImagePreprocessor::ImagePreprocessor(const rclcpp::NodeOptions& options)
   this->declare_parameter<bool>("enable_normalize", enable_normalize_);
   this->declare_parameter<std::vector<double>>("norm_mean", norm_mean_);
   this->declare_parameter<std::vector<double>>("norm_std", norm_std_);
+  // ── 曝光补偿开关 (2026-09-20 新增) ──
+  //   默认 false: Ultralytics 训练时不做这一步, 推理侧开着会造成分布错配。
+  //   要开的话, **训练数据也必须过同一套 compensate_exposure**。
+  this->declare_parameter<bool>("exposure_compensation_enabled",
+                                exposure_compensation_enabled_);
 
   // ── 前向相机参数 ──
-  this->declare_parameter<bool>("front_clahe_enabled", front_clahe_enabled_);
-  this->declare_parameter<double>("front_clahe_clip", front_clahe_clip_);
-  this->declare_parameter<int>("front_clahe_tile", front_clahe_tile_);
-  this->declare_parameter<std::vector<int64_t>>("front_roi", front_roi_);
+  this->declare_parameter<bool>("wide_clahe_enabled", wide_clahe_enabled_);
+  this->declare_parameter<double>("wide_clahe_clip", wide_clahe_clip_);
+  this->declare_parameter<int>("wide_clahe_tile", wide_clahe_tile_);
+  this->declare_parameter<std::vector<int64_t>>("wide_roi", wide_roi_);
 
   // ── 后向相机参数 ──
-  this->declare_parameter<bool>("rear_clahe_enabled", rear_clahe_enabled_);
-  this->declare_parameter<double>("rear_clahe_clip", rear_clahe_clip_);
-  this->declare_parameter<int>("rear_clahe_tile", rear_clahe_tile_);
-  this->declare_parameter<std::vector<int64_t>>("rear_roi", rear_roi_);
+  this->declare_parameter<bool>("tele_clahe_enabled", tele_clahe_enabled_);
+  this->declare_parameter<double>("tele_clahe_clip", tele_clahe_clip_);
+  this->declare_parameter<int>("tele_clahe_tile", tele_clahe_tile_);
+  this->declare_parameter<std::vector<int64_t>>("tele_roi", tele_roi_);
 
   // ── 读取所有参数 ──
   this->get_parameter("model_input_w", model_input_w_);
@@ -59,27 +64,40 @@ ImagePreprocessor::ImagePreprocessor(const rclcpp::NodeOptions& options)
   this->get_parameter("enable_normalize", enable_normalize_);
   this->get_parameter("norm_mean", norm_mean_);
   this->get_parameter("norm_std", norm_std_);
+  this->get_parameter("exposure_compensation_enabled", exposure_compensation_enabled_);
 
-  this->get_parameter("front_clahe_enabled", front_clahe_enabled_);
-  this->get_parameter("front_clahe_clip", front_clahe_clip_);
-  this->get_parameter("front_clahe_tile", front_clahe_tile_);
-  this->get_parameter("front_roi", front_roi_);
+  this->get_parameter("wide_clahe_enabled", wide_clahe_enabled_);
+  this->get_parameter("wide_clahe_clip", wide_clahe_clip_);
+  this->get_parameter("wide_clahe_tile", wide_clahe_tile_);
+  this->get_parameter("wide_roi", wide_roi_);
 
-  this->get_parameter("rear_clahe_enabled", rear_clahe_enabled_);
-  this->get_parameter("rear_clahe_clip", rear_clahe_clip_);
-  this->get_parameter("rear_clahe_tile", rear_clahe_tile_);
-  this->get_parameter("rear_roi", rear_roi_);
+  this->get_parameter("tele_clahe_enabled", tele_clahe_enabled_);
+  this->get_parameter("tele_clahe_clip", tele_clahe_clip_);
+  this->get_parameter("tele_clahe_tile", tele_clahe_tile_);
+  this->get_parameter("tele_roi", tele_roi_);
 
   // ── 规范化参数 ──
   model_input_w_ = std::max(16, std::min(model_input_w_, 4096));
   model_input_h_ = std::max(16, std::min(model_input_h_, 4096));
-  front_clahe_tile_ = std::max(2, std::min(front_clahe_tile_, 64));
-  rear_clahe_tile_  = std::max(2, std::min(rear_clahe_tile_,  64));
-  front_clahe_clip_ = std::max(0.0, std::min(front_clahe_clip_, 40.0));
-  rear_clahe_clip_  = std::max(0.0, std::min(rear_clahe_clip_,  40.0));
+  wide_clahe_tile_ = std::max(2, std::min(wide_clahe_tile_, 64));
+  tele_clahe_tile_  = std::max(2, std::min(tele_clahe_tile_,  64));
+  wide_clahe_clip_ = std::max(0.0, std::min(wide_clahe_clip_, 40.0));
+  tele_clahe_clip_  = std::max(0.0, std::min(tele_clahe_clip_,  40.0));
 
   if (norm_mean_.size() != 3) norm_mean_ = {0.485, 0.456, 0.406};
   if (norm_std_.size()  != 3) norm_std_  = {0.229, 0.224, 0.225};
+
+  // ⚠️ 归一化是一颗雷（2026-09-21 VM 实测踩过）:
+  //   打开后本节点输出 **32FC3 (float32)**，而订阅这条话题的 4 个传统 CV 检测器
+  //   做的是 `toCvShare(msg->image, BGR8)` —— **float32 转不了, 直接抛异常**，
+  //   而且不报错日志，表现是"整条相机链路一帧都收不到"。
+  //   归一化是**模型专属**的事，应由 ONNX 检测器自己 convertTo(1/255)。
+  if (enable_normalize_) {
+    RCLCPP_WARN(this->get_logger(),
+      "⚠️ enable_normalize=true → 输出编码变 32FC3(float32)。"
+      "订阅本话题的传统 CV 检测器要 uint8 BGR8, 它们会 cv_bridge 抛异常、"
+      "一帧都收不到。确认**所有订阅者**都能吃 float32 再开。");
+  }
 
   // ── 参数动态更新 ──
   param_callback_handle_ = this->add_on_set_parameters_callback(
@@ -89,20 +107,23 @@ ImagePreprocessor::ImagePreprocessor(const rclcpp::NodeOptions& options)
   // ⚠ QoS 必须 BEST_EFFORT (SensorDataQoS): 相机驱动 (usb_cam / realsense2_camera /
   //   Gazebo 相机插件) 一律按 sensor 数据发 BEST_EFFORT。RELIABLE 订阅者 ↔ BEST_EFFORT
   //   发布者 = QoS 不兼容, 一帧都收不到, 且不报错 (静默无数据)。
-  sub_front_ = this->create_subscription<sensor_msgs::msg::Image>(
-    "/camera_front/image_raw", rclcpp::SensorDataQoS(),
-    std::bind(&ImagePreprocessor::front_callback, this, std::placeholders::_1));
+  sub_wide_ = this->create_subscription<sensor_msgs::msg::Image>(
+    "/camera_wide/image_raw", rclcpp::SensorDataQoS(),
+    std::bind(&ImagePreprocessor::wide_callback, this, std::placeholders::_1));
 
-  sub_rear_ = this->create_subscription<sensor_msgs::msg::Image>(
-    "/camera_rear/image_raw", rclcpp::SensorDataQoS(),
-    std::bind(&ImagePreprocessor::rear_callback, this, std::placeholders::_1));
+  sub_tele_ = this->create_subscription<sensor_msgs::msg::Image>(
+    "/camera_tele/image_raw", rclcpp::SensorDataQoS(),
+    std::bind(&ImagePreprocessor::tele_callback, this, std::placeholders::_1));
 
   // ── 发布预处理图像 (与下游检测器保持同为 BEST_EFFORT, 两侧必须一起改) ──
-  pub_front_ = this->create_publisher<sensor_msgs::msg::Image>(
-    "/perception/camera_front/preprocessed", rclcpp::SensorDataQoS());
+  // ⚠️ 2026-09-20: 类型改为 PreprocessedImage —— 它把 letterbox 变换 (scale/pad/orig)
+  //    一起带走, 检测器才能把 bbox 从「letterbox 坐标」反算回「原图坐标」。
+  //    不反算的话, 所有 2D→3D 投影会整体偏移 (近处看不出、远处错得离谱)。
+  pub_wide_ = this->create_publisher<br_perception::msg::PreprocessedImage>(
+    "/perception/camera_wide/preprocessed", rclcpp::SensorDataQoS());
 
-  pub_rear_ = this->create_publisher<sensor_msgs::msg::Image>(
-    "/perception/camera_rear/preprocessed", rclcpp::SensorDataQoS());
+  pub_tele_ = this->create_publisher<br_perception::msg::PreprocessedImage>(
+    "/perception/camera_tele/preprocessed", rclcpp::SensorDataQoS());
 
   // ── 诊断 ──
   pub_diagnostics_ = this->create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
@@ -110,16 +131,16 @@ ImagePreprocessor::ImagePreprocessor(const rclcpp::NodeOptions& options)
 
   RCLCPP_INFO(this->get_logger(),
     "ImagePreprocessor ready | model=%dx%d | "
-    "front(clahe=%s clip=%.1f tile=%d roi=%ld×%ld+%ld+%ld) | "
-    "rear(clahe=%s clip=%.1f tile=%d roi=%ld×%ld+%ld+%ld) | "
+    "wide(clahe=%s clip=%.1f tile=%d roi=%ld×%ld+%ld+%ld) | "
+    "tele(clahe=%s clip=%.1f tile=%d roi=%ld×%ld+%ld+%ld) | "
     "normalize=%s (mean=[%.3f,%.3f,%.3f] std=[%.3f,%.3f,%.3f])",
     model_input_w_, model_input_h_,
-    front_clahe_enabled_ ? "on" : "off", front_clahe_clip_, front_clahe_tile_,
-    front_roi_.size() >= 4 ? front_roi_[2] : 0, front_roi_.size() >= 4 ? front_roi_[3] : 0,
-    front_roi_.size() >= 2 ? front_roi_[0] : 0, front_roi_.size() >= 2 ? front_roi_[1] : 0,
-    rear_clahe_enabled_  ? "on" : "off", rear_clahe_clip_,  rear_clahe_tile_,
-    rear_roi_.size()  >= 4 ? rear_roi_[2]  : 0, rear_roi_.size()  >= 4 ? rear_roi_[3]  : 0,
-    rear_roi_.size()  >= 2 ? rear_roi_[0]  : 0, rear_roi_.size()  >= 2 ? rear_roi_[1]  : 0,
+    wide_clahe_enabled_ ? "on" : "off", wide_clahe_clip_, wide_clahe_tile_,
+    wide_roi_.size() >= 4 ? wide_roi_[2] : 0, wide_roi_.size() >= 4 ? wide_roi_[3] : 0,
+    wide_roi_.size() >= 2 ? wide_roi_[0] : 0, wide_roi_.size() >= 2 ? wide_roi_[1] : 0,
+    tele_clahe_enabled_  ? "on" : "off", tele_clahe_clip_,  tele_clahe_tile_,
+    tele_roi_.size()  >= 4 ? tele_roi_[2]  : 0, tele_roi_.size()  >= 4 ? tele_roi_[3]  : 0,
+    tele_roi_.size()  >= 2 ? tele_roi_[0]  : 0, tele_roi_.size()  >= 2 ? tele_roi_[1]  : 0,
     enable_normalize_ ? "on" : "off",
     norm_mean_[0], norm_mean_[1], norm_mean_[2],
     norm_std_[0],  norm_std_[1],  norm_std_[2]);
@@ -128,23 +149,23 @@ ImagePreprocessor::ImagePreprocessor(const rclcpp::NodeOptions& options)
 // ═══════════════════════════════════════════════════════════════════════════════
 // 前向相机回调
 // ═══════════════════════════════════════════════════════════════════════════════
-void ImagePreprocessor::front_callback(const sensor_msgs::msg::Image::SharedPtr msg)
+void ImagePreprocessor::wide_callback(const sensor_msgs::msg::Image::SharedPtr msg)
 {
-  process_and_publish(msg, "front",
-                      front_clahe_enabled_, front_clahe_clip_, front_clahe_tile_,
-                      front_roi_, pub_front_);
-  front_frame_seq_++;
+  process_and_publish(msg, "wide",
+                      wide_clahe_enabled_, wide_clahe_clip_, wide_clahe_tile_,
+                      wide_roi_, pub_wide_);
+  wide_frame_seq_++;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 后向相机回调
 // ═══════════════════════════════════════════════════════════════════════════════
-void ImagePreprocessor::rear_callback(const sensor_msgs::msg::Image::SharedPtr msg)
+void ImagePreprocessor::tele_callback(const sensor_msgs::msg::Image::SharedPtr msg)
 {
-  process_and_publish(msg, "rear",
-                      rear_clahe_enabled_, rear_clahe_clip_, rear_clahe_tile_,
-                      rear_roi_, pub_rear_);
-  rear_frame_seq_++;
+  process_and_publish(msg, "tele",
+                      tele_clahe_enabled_, tele_clahe_clip_, tele_clahe_tile_,
+                      tele_roi_, pub_tele_);
+  tele_frame_seq_++;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -155,7 +176,7 @@ void ImagePreprocessor::process_and_publish(
     const std::string& cam_name,
     bool clahe_enabled, double clahe_clip, int clahe_tile,
     const std::vector<int64_t>& roi,
-    const rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr& pub)
+    const rclcpp::Publisher<br_perception::msg::PreprocessedImage>::SharedPtr& pub)
 {
   // ── 计时起点 ──
   auto t0 = std::chrono::steady_clock::now();
@@ -182,12 +203,15 @@ void ImagePreprocessor::process_and_publish(
   const int orig_h = bgr.rows;
 
   // ── 2. 预处理管线 ──
+  //    前后相机各存一份 letterbox 变换 (回调可并发, 各写各的成员) ——
+  //    **下游检测器反算检测框坐标时必须用它**, 否则 2D→3D 投影全偏。
+  LetterboxTransform* tf = (cam_name == "wide") ? &wide_letterbox_ : &tele_letterbox_;
   std::string out_encoding;
   cv::Mat processed = preprocess(bgr, roi,
                                  clahe_enabled, clahe_clip, clahe_tile,
                                  model_input_w_, model_input_h_,
                                  enable_normalize_, norm_mean_, norm_std_,
-                                 out_encoding);
+                                 out_encoding, tf);
 
   if (processed.empty()) {
     RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
@@ -195,9 +219,18 @@ void ImagePreprocessor::process_and_publish(
     return;
   }
 
-  // ── 3. cv::Mat → ROS Image + 发布 ──
-  auto out_msg = cv_bridge::CvImage(msg->header, out_encoding, processed).toImageMsg();
-  pub->publish(*out_msg);
+  // ── 3. cv::Mat → PreprocessedImage (图 + letterbox 变换) + 发布 ──
+  //    ⚠️ 变换必须随图一起发: 检测器拿到 640×384 的 letterbox 图之后,
+  //       **无法从图像本身推出** orig_w/orig_h 和填充量。
+  br_perception::msg::PreprocessedImage out_msg;
+  out_msg.header = msg->header;                       // ⚠ 继承曝光时刻, 禁止用 now()
+  out_msg.image  = *cv_bridge::CvImage(msg->header, out_encoding, processed).toImageMsg();
+  out_msg.scale  = static_cast<float>(tf->scale);
+  out_msg.pad_x  = tf->pad_x;
+  out_msg.pad_y  = tf->pad_y;
+  out_msg.orig_w = tf->orig_w;                        // letterbox 之前 (ROI 之后) 的尺寸
+  out_msg.orig_h = tf->orig_h;
+  pub->publish(out_msg);
 
   // ── 4. 耗时统计 ──
   auto t1 = std::chrono::steady_clock::now();
@@ -205,7 +238,7 @@ void ImagePreprocessor::process_and_publish(
 
   // ── 5. 诊断 ──
   publish_diagnostics(cam_name, total_ms,
-                      (cam_name == "front") ? front_frame_seq_ : rear_frame_seq_,
+                      (cam_name == "wide") ? wide_frame_seq_ : tele_frame_seq_,
                       orig_w, orig_h,
                       processed.cols, processed.rows,
                       out_encoding);
@@ -230,7 +263,8 @@ cv::Mat ImagePreprocessor::preprocess(
     bool normalize_enabled,
     const std::vector<double>& norm_mean,
     const std::vector<double>& norm_std,
-    std::string& out_encoding)
+    std::string& out_encoding,
+    LetterboxTransform* tf_out)
 {
   // ── Step 1: ROI 裁剪 ──
   cv::Mat working = crop_roi(bgr, roi);
@@ -241,11 +275,15 @@ cv::Mat ImagePreprocessor::preprocess(
     working = apply_clahe(working, clahe_clip, clahe_tile);
   }
 
-  // ── Step 3: 曝光补偿 ──
-  working = compensate_exposure(working);
+  // ── Step 3: 曝光补偿 (可选; 默认关, 见 exposure_compensation_enabled_) ──
+  if (exposure_compensation_enabled_) {
+    working = compensate_exposure(working);
+  }
 
-  // ── Step 4: Resize 到模型输入尺寸 ──
-  working = resize_to_model(working, target_w, target_h);
+  // ── Step 4: **letterbox** 到模型输入尺寸 ──
+  //    ⚠️ 2026-09-20 改: 原为 resize_to_model 的**硬拉伸**, 会把 16:9 的相机画面
+  //    在 5:3 的输入上纵向拉伸 6.7%, 且与 Ultralytics 训练时的 letterbox 不一致。
+  working = letterbox_to_model(working, target_w, target_h, tf_out);
 
   // ── Step 5: BGR → RGB ──
   working = convert_bgr_to_rgb(working);
@@ -397,20 +435,43 @@ cv::Mat ImagePreprocessor::compensate_exposure(const cv::Mat& bgr)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Step 4: Resize 到模型输入尺寸
+// Step 4: letterbox 到模型输入尺寸  (2026-09-20: 取代原"硬拉伸"版 resize_to_model)
+//
+//   等比缩放到能完整放进 target, 四周居中补 kLetterboxPadValue(114) 灰边。
+//   这与 Ultralytics 训练时的预处理一致 —— 原实现(直接 cv::resize 拉伸)
+//   会让 1280×720 → 640×384 纵向拉伸 6.7%, 训练/推理分布不一致。
+//
+//   ⚠️ 填充值用 **114 灰** 而不是 0 黑: Ultralytics 的 letterbox 就是 114。
+//      用 0 会在边框处造出一条纯黑带, 网络没见过。
 // ═══════════════════════════════════════════════════════════════════════════════
-cv::Mat ImagePreprocessor::resize_to_model(const cv::Mat& image,
-                                           int target_w, int target_h)
+cv::Mat ImagePreprocessor::letterbox_to_model(const cv::Mat& image,
+                                              int target_w, int target_h,
+                                              LetterboxTransform* tf_out)
 {
-  // 尺寸已匹配 → 不缩放
+  const LetterboxTransform tf = compute_letterbox(image.cols, image.rows,
+                                                   target_w, target_h);
+  if (tf_out != nullptr) {
+    *tf_out = tf;
+  }
+
+  // 尺寸已完全匹配 → 不缩放不填充
   if (image.cols == target_w && image.rows == target_h) {
     return image;
   }
 
-  cv::Mat resized;
+  // ── 等比缩放 ──
+  cv::Mat scaled;
   // INTER_LINEAR: 速度与质量的平衡; 如需更高精度可换 INTER_CUBIC
-  cv::resize(image, resized, cv::Size(target_w, target_h), 0, 0, cv::INTER_LINEAR);
-  return resized;
+  cv::resize(image, scaled, cv::Size(tf.content_w(), tf.content_h()),
+             0, 0, cv::INTER_LINEAR);
+
+  // ── 居中填充 ──
+  cv::Mat out(target_h, target_w, scaled.type(),
+              cv::Scalar::all(kLetterboxPadValue));
+  const int x0 = std::max(0, std::min(tf.pad_x, target_w - scaled.cols));
+  const int y0 = std::max(0, std::min(tf.pad_y, target_h - scaled.rows));
+  scaled.copyTo(out(cv::Rect(x0, y0, scaled.cols, scaled.rows)));
+  return out;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -570,67 +631,67 @@ rcl_interfaces::msg::SetParametersResult ImagePreprocessor::on_parameter_change(
       }
 
       // ── 前向相机参数 ──
-      else if (name == "front_clahe_enabled") {
-        front_clahe_enabled_ = param.as_bool();
+      else if (name == "wide_clahe_enabled") {
+        wide_clahe_enabled_ = param.as_bool();
       }
-      else if (name == "front_clahe_clip") {
+      else if (name == "wide_clahe_clip") {
         double val = param.as_double();
         if (val < 0.0 || val > 40.0) {
           result.successful = false;
-          result.reason = "front_clahe_clip must be in [0, 40]";
+          result.reason = "wide_clahe_clip must be in [0, 40]";
           break;
         }
-        front_clahe_clip_ = val;
+        wide_clahe_clip_ = val;
       }
-      else if (name == "front_clahe_tile") {
+      else if (name == "wide_clahe_tile") {
         int val = param.as_int();
         if (val < 2 || val > 64) {
           result.successful = false;
-          result.reason = "front_clahe_tile must be in [2, 64]";
+          result.reason = "wide_clahe_tile must be in [2, 64]";
           break;
         }
-        front_clahe_tile_ = val;
+        wide_clahe_tile_ = val;
       }
-      else if (name == "front_roi") {
+      else if (name == "wide_roi") {
         auto val = param.as_integer_array();
         if (val.size() != 4) {
           result.successful = false;
-          result.reason = "front_roi must have exactly 4 elements [x, y, w, h]";
+          result.reason = "wide_roi must have exactly 4 elements [x, y, w, h]";
           break;
         }
-        front_roi_ = val;
+        wide_roi_ = val;
       }
 
       // ── 后向相机参数 ──
-      else if (name == "rear_clahe_enabled") {
-        rear_clahe_enabled_ = param.as_bool();
+      else if (name == "tele_clahe_enabled") {
+        tele_clahe_enabled_ = param.as_bool();
       }
-      else if (name == "rear_clahe_clip") {
+      else if (name == "tele_clahe_clip") {
         double val = param.as_double();
         if (val < 0.0 || val > 40.0) {
           result.successful = false;
-          result.reason = "rear_clahe_clip must be in [0, 40]";
+          result.reason = "tele_clahe_clip must be in [0, 40]";
           break;
         }
-        rear_clahe_clip_ = val;
+        tele_clahe_clip_ = val;
       }
-      else if (name == "rear_clahe_tile") {
+      else if (name == "tele_clahe_tile") {
         int val = param.as_int();
         if (val < 2 || val > 64) {
           result.successful = false;
-          result.reason = "rear_clahe_tile must be in [2, 64]";
+          result.reason = "tele_clahe_tile must be in [2, 64]";
           break;
         }
-        rear_clahe_tile_ = val;
+        tele_clahe_tile_ = val;
       }
-      else if (name == "rear_roi") {
+      else if (name == "tele_roi") {
         auto val = param.as_integer_array();
         if (val.size() != 4) {
           result.successful = false;
-          result.reason = "rear_roi must have exactly 4 elements [x, y, w, h]";
+          result.reason = "tele_roi must have exactly 4 elements [x, y, w, h]";
           break;
         }
-        rear_roi_ = val;
+        tele_roi_ = val;
       }
 
       else {
@@ -647,10 +708,10 @@ rcl_interfaces::msg::SetParametersResult ImagePreprocessor::on_parameter_change(
 
   if (result.successful) {
     RCLCPP_INFO(this->get_logger(),
-      "Params updated | model=%dx%d | front_clahe=%s(%.1f,%d) rear_clahe=%s(%.1f,%d) | normalize=%s",
+      "Params updated | model=%dx%d | wide_clahe=%s(%.1f,%d) tele_clahe=%s(%.1f,%d) | normalize=%s",
       model_input_w_, model_input_h_,
-      front_clahe_enabled_ ? "on" : "off", front_clahe_clip_, front_clahe_tile_,
-      rear_clahe_enabled_  ? "on" : "off", rear_clahe_clip_,  rear_clahe_tile_,
+      wide_clahe_enabled_ ? "on" : "off", wide_clahe_clip_, wide_clahe_tile_,
+      tele_clahe_enabled_  ? "on" : "off", tele_clahe_clip_,  tele_clahe_tile_,
       enable_normalize_    ? "on" : "off");
   } else {
     RCLCPP_WARN(this->get_logger(), "Param update rejected: %s", result.reason.c_str());
