@@ -97,7 +97,7 @@ TEST(TimerTest, reset回到初始状态)
   Timer t;
   t.start();
   busy_wait_ms(2.0);
-  t.stop();
+  (void)t.stop();   // 只为停表, 返回值此处无意义 → 显式丢弃 (stop 是 [[nodiscard]])
   t.reset();
   EXPECT_FALSE(t.running());
   EXPECT_DOUBLE_EQ(0.0, t.stop());
