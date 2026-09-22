@@ -50,3 +50,7 @@ scripts/_rulebook*.txt
 
 # ── 代码目录里的散图 (图统一放 doc/) ──
 src/**/*.svg
+
+# ── 本机临时构建/提取产物 (Windows 侧 g++ 试编、PDF 抽文本等) ──
+#    ⚠️ 里面会有从主办方 PDF 抽出来的文本 → 与上面的规则书同理, 不能进 public 仓库
+.local_build/

@@ -165,6 +165,57 @@ camera_depth:
     stream_timeout_sec: 1.0       # 多久没帧判"深度流断了"并报 ERROR 诊断
                                   #   ⚠️ 会被下限抬到 >= 1/diag_rate_hz
 
+# ═════════════════════════════════════════════════════════════════════════════════
+# 6. 相机层聚合薄壳 (camera_perception) —— 任务书 §15.1 模块 10, P0-2
+#    把上面 3 个检测器 × 两路相机 + 深度，聚合成"某一时刻的那一帧"。
+#    **不做检测、不变换坐标、不碰外参** —— 只做时间对齐 + 打包。
+#
+#    ⚠️ 三个检测输入参数是**前缀**（名字里就带 `_prefix`），节点会自动拼
+#       `_wide` / `_tele` —— 与三个检测器的发布名逐字符对应
+#       (mustika_wide / mustika_tele / …)。改名前先看那边。
+#       ⚠️ 填成带后缀的全名会得到 `..._wide_wide`，**静默收不到任何数据**（不报错）。
+# ═════════════════════════════════════════════════════════════════════════════════
+camera_perception:
+  ros__parameters:
+    # ── 输入话题**前缀**（节点自动加 _wide / _tele 后缀）──
+    mustika_topic_prefix: "/perception/camera/mustika"
+    pillar_topic_prefix:  "/perception/camera/pillars"
+    spot_topic_prefix:    "/perception/camera/building_spots"
+    depth_topic:          "/perception/camera/depth"   # 这一路**不加后缀**（只有一路）
+
+    # ── 输出话题 ──
+    frame_topic:   "/perception/camera/frame"
+    diag_topic:    "/perception/camera/frame_diagnostics"
+
+    # ── 组帧节流 ──
+    frame_rate_hz: 30.0           # 组帧频率 —— ⚠️ 与检测器耗时**无关**:
+                                  #   慢的那路只会让它的 stale_sec 变大, 不拖慢整帧
+    diag_rate_hz:  1.0            # 诊断发布频率 (不是每帧)
+
+    # ── 告警阈值 ──
+    assembly_warn_ms: 5.0         # 组帧耗时超此值告警 [ms]
+                                  #   ⚠️ 这只是**组帧本身**的开销 (拷 6~7 条小消息),
+                                  #      不含检测耗时、也不含发布本身。
+                                  #      本节点不等待任何检测器 ——
+                                  #      所以它慢只有一种可能: 消息体变大了。
+                                  #   ⚠️ 用单调时钟量, 仿真里 ROS 时间暂停不会误报。
+
+    future_tolerance_sec: 0.05    # 时间戳"未来"多少秒以内算正常 [s]
+                                  #   超出 → 报 WARN (时钟跳变/驱动异常), 且该值
+                                  #   如实写进 slot_status[].stale_sec (负值),
+                                  #   **不钳到 0** —— 异常本身就是要暴露的东西
+
+    fresh_tolerance_sec: 0.5      # ⭐ FRESH / STALE 的分界 [s]
+                                  #   stale_sec 超过它就报 STALE。**这条是必需的**:
+                                  #   曝光时刻永远早于组帧时刻 → stale_sec 恒为正数,
+                                  #   若拿 ">0" 当界, state 永远到不了 FRESH。
+                                  #   调参要同时满足两件相反的事:
+                                  #     · 比"检测器**正常**周期"大 (处理 20~40ms 的健康路
+                                  #       不该闪 STALE) —— 这也是它按"秒"给而不是按帧给的原因
+                                  #     · 比"真停了"短 (停掉的路要半秒内变成 STALE)
+                                  #   默认 0.5s ≈ 30Hz 下 15 帧没更新才算旧。
+                                  #   ⚠️ 填 0 会被下限抬到 0.01s, 那会让每个槽都恒报 STALE
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 相机硬件规格（内外参 / 分辨率 / 曝光）已拆到 **config/camera_hardware.yaml**
 #   —— 那些不是 ROS 节点参数, 留在这里会让整份文件加载失败 (2026-09-21)

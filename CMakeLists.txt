@@ -53,6 +53,12 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/PreprocessedImage.msg"
   # 2026-09-20 新增: D435i 深度辅助 (§3.0 三相机并行)
   "msg/CameraDepth.msg"
+  # 2026-09-21 新增: 相机层聚合帧 (§15.1 模块 10, P0-2)
+  #   ⚠️ 下面两条的**先后顺序不影响构建** —— rosidl 按 IDL 依赖图解析同包引用,
+  #      不看本列表的实参顺序(本仓库现有的同包引用恰好都是"被引用者在前",
+  #      所以这里没有能证明该点的先例; 真遇到解析失败, 再考虑调序)。
+  "msg/SlotStatus.msg"
+  "msg/CameraFrame.msg"
   # std_msgs: PerceptionFrame 与 LidarResult 都用了 std_msgs/Header
   DEPENDENCIES geometry_msgs std_msgs builtin_interfaces diagnostic_msgs sensor_msgs
 )
@@ -212,6 +218,24 @@ add_lidar_component(camera_depth_component
 target_link_libraries(camera_depth_component
   ${OpenCV_LIBRARIES}
   ${cpp_typesupport_target})
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 11c. CameraPerceptionNode — 相机层聚合薄壳 (§15.1 模块 10, P0-2)
+#      把 3 个检测器 × 两路相机 + 深度聚合成一帧。**只做时间对齐 + 打包**。
+#
+#      ⚠️ 刻意不走 add_lidar_component 宏 —— 那个宏无条件链 PCL, 而本节点
+#         只订阅已有话题、只做消息拷贝, **不碰点云也不碰图像**(与 comm_node 同理)。
+#         走宏会白白把它挂上 PCL 依赖, 容器化时那是个真的负担。
+# ═══════════════════════════════════════════════════════════════════════════
+add_library(camera_perception_component SHARED
+  src/camera/camera_perception_node.cpp)
+ament_target_dependencies(camera_perception_component
+  rclcpp rclcpp_components std_msgs diagnostic_msgs)
+target_link_libraries(camera_perception_component
+  ${cpp_typesupport_target})
+rclcpp_components_register_node(camera_perception_component
+  PLUGIN "br_perception::camera::CameraPerceptionNode"
+  EXECUTABLE camera_perception_node)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 12. CoordinateTransformer — 坐标变换 / 里程计可靠性 (模块 17)
@@ -377,6 +401,7 @@ install(TARGETS
   building_spot_detector
   pillar_detector
   camera_depth
+  camera_perception_node
   comm_node
   DESTINATION lib/${PROJECT_NAME})
 
@@ -394,6 +419,7 @@ install(TARGETS
   building_spot_detector_component
   pillar_detector_component
   camera_depth_component
+  camera_perception_component
   coordinate_transformer
   common_utils
   communication

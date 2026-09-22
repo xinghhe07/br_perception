@@ -1,0 +1,119 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# camera_debug.rviz — 相机层联调视图 (bringup_debug.launch.py 用)
+#
+# ⚠️⚠️ 所有显示项的 Reliability Policy **必须是 Best Effort**。
+#    相机层的图像话题（相机驱动 / Gazebo 传感器）都是 SensorDataQoS = BEST_EFFORT，
+#    而 RViz 的默认是 **Reliable** —— 两者**不兼容，RViz 什么都不显示**，
+#    还只在 Global Status 里报一句 QoS 不兼容，很容易被当成"数据没通"。
+#    这个坑 bringup_gazebo.launch.py:122 已经为点云踩过一次（见 config/gazebo_sim.rviz），
+#    相机层同理。**新增显示项时照着现有的抄，别用 RViz 界面默认值。**
+#
+# ⚠️ 本文件**没有用 RViz 实际打开验证过**（本机无 ROS）——
+#    结构照抄 config/gazebo_sim.rviz（那份是实测可用的）。若 RViz 报
+#    "Failed to load" 之类，多半是某个显示项缺字段：删掉那一项即可，
+#    其余项不受影响。
+#
+# 本文件看什么:
+#   · 四路原始图 —— 确认**相机到底有没有在发**（联调第一问）
+#   · 检测叠加（画在检测器节点里的 debug 图上, 待各检测器确认是否发布）
+# ═══════════════════════════════════════════════════════════════════════════════
+
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /Global Options1
+      Splitter Ratio: 0.5
+    Tree Height: 700
+
+Visualization Manager:
+  Class: ""
+  Displays:
+    # ── 原始图：确认相机在发 ──
+    # ⚠️ 这四个话题**没有共同的坐标系**（两台工业相机 + 一台深度相机各自独立），
+    #    所以本视图里**不显示任何需要 TF 的东西** —— Image 显示项本来也不需要 TF。
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Name: 宽角原始图 (/camera_wide/image_raw)
+      Queue Size: 2
+      Transport Hint: raw
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort      # ⚠️ 见文件头 —— 不能改 Reliable
+        Value: /camera_wide/image_raw
+
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Name: 长焦原始图 (/camera_tele/image_raw)
+      Queue Size: 2
+      Transport Hint: raw
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort      # ⚠️ 同上
+        Value: /camera_tele/image_raw
+
+    # ── 预处理图：确认 letterbox / CLAHE 生效 ──
+    #    尺寸应是 camera_params.yaml 的 model_input_w × model_input_h（当前 640×384），
+    #    **不是**相机原始分辨率 —— 若是原始尺寸，说明预处理没跑或没生效。
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Name: 宽角预处理图 (640×384, letterbox)
+      Queue Size: 2
+      Transport Hint: raw
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /perception/camera_wide/preprocessed
+
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Name: 长焦预处理图 (640×384, letterbox)
+      Queue Size: 2
+      Transport Hint: raw
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /perception/camera_tele/preprocessed
+
+    # ── D435i 深度图 ──
+    #    ⚠️ 深度节点 99% 时间在 IDLE（没收到 ROI），但**深度图本身一直在发** ——
+    #       所以这条有画面**不代表**深度测量通。要测 MEASURE 通路见 launch 的说明。
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Name: D435i 深度图 (/camera/depth/image_rect_raw)
+      Queue Size: 2
+      Transport Hint: raw
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /camera/depth/image_rect_raw
+
+  Enabled: true
+  Global Options:
+    Background Color: 48; 48; 48
+    # ⚠️ Fixed Frame 在**本视图里几乎不起作用** —— 上面全是 Image 显示项，
+    #    不参与 TF 变换。（相机层刻意没有统一坐标系，见 msg/CameraFrame.msg 的 frame_id 说明。）
+    #    这里填 base_link 只为让 RViz 有个合法初值；若它不在 TF 树里，
+    #    RViz 顶部会报 Global Status 错误，但**图像照常显示**，可忽略。
+    Fixed Frame: base_link
+    Frame Rate: 20
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/FocusCamera
+  Value: true
+
+Window Geometry:
+  Height: 900
+  Width: 1400
