@@ -152,6 +152,17 @@ mustika_pillar_check:
     diag_topic:  "/perception/fusion/mustika_check"
 
     # ── ⚠️⚠️ 人工闸：外参是否已标定（见上方大段说明）──
+    #
+    # ⚠️⚠️ **别改这一行来翻闸**（2026-09-23 补的说明）。要翻，用 launch 参数：
+    #
+    #       ros2 launch br_perception bringup_full.launch.py mustika_gate:=true
+    #
+    #    理由：本行是**仓库事实源**，直接改它 = 事后分不清"这是临时翻的"还是
+    #    "真标定过了" —— 而这道闸的设计意图恰恰是**让开始信任它是一个明确动作**。
+    #    launch 参数那条路每次翻闸都在**启动命令里看得见**，且不改任何文件。
+    #    （也不要用 `ros2 run ... -p`：那条路上"文件与 -p 谁压谁"**本仓库有两条
+    #      互相矛盾的实测**，未定因，别赌 —— 见 doc/模块进度.md §七。）
+    #    ⚠️ 本行**仍然是那两条路的事实源**：launch 参数不传时就是它说了算。
     extrinsics_calibrated: false
 
     # ── 坐标系（⚠️ 必须与上面 `static_tf:` 块里的 frame 名逐字一致）──

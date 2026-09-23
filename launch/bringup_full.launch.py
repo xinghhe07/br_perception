@@ -32,8 +32,10 @@
   ros2 launch br_perception bringup_full.launch.py perception_rviz:=false lio:=false
   ros2 launch br_perception bringup_full.launch.py comm:=false     # 台架(无下位机/无串口)
   ros2 launch br_perception bringup_full.launch.py camera:=false   # 没有相机驱动时闭嘴
+  ros2 launch br_perception bringup_full.launch.py mustika_gate:=true   # ⚠ 标定完成后才翻
   ⚠️ `comm` 默认 **true**：关掉它 = 感知算完的东西**到不了 STM32**，比赛模式别关。
   ⚠️ `camera` 默认 **true**：关掉它 = 「穆斯蒂卡在柱上」那 250 分**没有来源**。
+  ⚠️ `mustika_gate` 默认 **false**：那是外参**人工闸**，未标定时翻它 = 拿占位外参的巧合当真。
 """
 
 import os
@@ -47,6 +49,10 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import ComposableNodeContainer, Node
 from launch_ros.descriptions import ComposableNode
+# ⚠️ `ParameterValue(..., value_type=bool)` —— **必须显式给类型**：
+#    `LaunchConfiguration` 求值出来是**字符串** "true"/"false"，
+#    直接当 bool 参数传就得依赖隐式转换，而 `bool("false")` 是 `True`（Python 的坑）。
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def _resolve_launch(share_dir, launch_file):
@@ -101,6 +107,30 @@ def generate_launch_description():
         'camera', default_value='true', choices=['true', 'false'],
         description='启动相机层最小集 (image_preprocessor + mustika_detector + '
                     'camera_perception)。⚠️ **比赛模式必须 true**')
+    # ⚠️⚠️ **翻闸口**（2026-09-23 补）。
+    #
+    #  ── 为什么做成 launch 参数，而不是"改 yaml / 拼 `ros2 run -p`" ──
+    #  ① 改 `config/fusion_params.yaml` 里那个 `extrinsics_calibrated: false`
+    #     = 改仓库事实源，改完**看不出来"这是临时翻的"**，容易被后来人当成
+    #     "已经标定过了"。而那道闸的设计意图恰恰是"让开始信任它是个明确动作"。
+    #  ② `ros2 run ... --params-file X -p k:=v` 这条路上，**参数谁压谁有争议**：
+    #     2026-09-19 的 socat 联调用的同型写法（`--params-file comm_params.yaml
+    #     -p serial_device:=/tmp/ttyROS`）**是生效的**（伪下位机逐帧解码成功）；
+    #     而 2026-09-23 在本节点上，同型写法**看起来没生效**。
+    #     ⚠️ **这两条观察互相矛盾，用"文件压过 -p"解释不了两条** ——
+    #        所以**别把任何一条当成已定的因果**（另见那次测试的孤儿进程污染）。
+    #     详见 doc/模块进度.md §七「mustika_pillar_check 首轮复核」。
+    #  ⇒ 干脆绕开这个争议：用 launch 自己的 `parameters=[文件, {键:值}]`
+    #     —— **后者覆盖前者**，这是本仓库**已验证**的机制
+    #     （bringup_debug 的 color_yaml_path 覆盖就走这条）。
+    #
+    #  翻闸: `ros2 launch br_perception bringup_full.launch.py mustika_gate:=true`
+    #  ⚠️ 默认 false 是**设计意图**，不是保守 —— 未标定时发"在柱上"会让主控
+    #     白派 TR 去抓一个不存在的球。
+    mustika_gate_arg = DeclareLaunchArgument(
+        'mustika_gate', default_value='false', choices=['true', 'false'],
+        description='穆斯蒂卡在柱上判定的**外参人工闸**。true = 允许发"在柱上/掉落"'
+                    '（**仅外参标定完成后**使用）；false = 只发 0=未知')
     rviz = LaunchConfiguration('perception_rviz')
     lio = LaunchConfiguration('lio')
 
@@ -309,7 +339,12 @@ def generate_launch_description():
         # ⚠️ 它的参数块 `mustika_pillar_check:` 就在 `fusion_params.yaml` 里
         #    （与上面 `/**` 块是两个作用域）。漏传 → 全吃代码默认值，
         #    而那里面有**占位内参**，且**不会报错**。
-        parameters=[os.path.join(pkg_share, 'config', 'fusion_params.yaml')])
+        # ⚠️ **顺序有意义：后面的覆盖前面的**（同 bringup_debug 的 make_params）——
+        #    第二个元素就是翻闸口，见上面 `mustika_gate_arg` 那段。
+        parameters=[os.path.join(pkg_share, 'config', 'fusion_params.yaml'),
+                    {'extrinsics_calibrated':
+                         ParameterValue(LaunchConfiguration('mustika_gate'),
+                                        value_type=bool)}])
 
     perception_rviz_node = Node(
         package='rviz2', executable='rviz2', name='rviz2', output='screen',
@@ -350,6 +385,7 @@ def generate_launch_description():
         lio_arg,
         comm_arg,
         camera_arg,
+        mustika_gate_arg,
         LogInfo(msg="[br_perception] 比赛模式启动 — §10.1 (里程计: Point-LIO 纯里程计 + 场地先验)"),
         # ⚠️ 展开：个数由 `fusion_params.yaml` 的 `static_tf:` 块决定，
         #    不再与本文件写死的三个节点绑定（加减传感器只改 yaml）
