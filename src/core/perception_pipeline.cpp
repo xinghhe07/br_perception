@@ -1020,6 +1020,11 @@ void PerceptionPipeline::publish_emergency_stop(bool stop)
 }  // namespace core
 }  // namespace br_perception
 
+// ⚠️ `RCLCPP_COMPONENTS_REGISTER_NODE` 由这个头文件定义 —— 漏了它不是"未定义标识符"
+//    那么直白，而是 "expected constructor, destructor, or type conversion at end of input"
+//    （2026-09-23 首次编译实测，浪费一轮）。lidar_perception_node.cpp 也是这个写法。
+#include <rclcpp_components/register_node_macro.hpp>
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // 组件注册（容器化时被容器加载; 也生成同名独立可执行）
 // ═══════════════════════════════════════════════════════════════════════════════

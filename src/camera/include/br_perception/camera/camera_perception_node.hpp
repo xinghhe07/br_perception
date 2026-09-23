@@ -168,9 +168,13 @@ private:
   /// ⚠️ **时间戳取 `msg->header.stamp`，不取 `this->now()`** ——
   ///    任务书 §四「时间戳约定」要求所有检测结果的时间戳是**曝光时刻**。
   ///    到达时刻含处理与传输抖动，正是下游要判断的东西，混进来会掩盖真实时序问题。
+  /// ⚠️ 成员指针的类型写 `std::shared_ptr<MsgT> SlotData::*`，**不是** `MsgT SlotData::*`：
+  ///    `SlotData` 里存的本来就是 `Xxx::SharedPtr`，若按 `MsgT SlotData::*` 推导，
+  ///    `MsgT` 会被推成 `std::shared_ptr<...>` 本身，于是 `MsgT::SharedPtr` 不存在
+  ///    （2026-09-23 首次编译实测：no type named 'SharedPtr' in class std::shared_ptr<...>）。
   template <typename MsgT>
   void store_slot(size_t slot,
-                  MsgT SlotData::*member,
+                  std::shared_ptr<MsgT> SlotData::*member,
                   const typename MsgT::SharedPtr& msg,
                   uint8_t expected_cam);
 

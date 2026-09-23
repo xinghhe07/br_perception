@@ -385,11 +385,16 @@ TEST(FrameLayoutTest, CRC覆盖整帧而非仅payload)
   // ⚠ 两个期望值都是**独立 Python 实现**算的 (脚本见上面 golden 那段), 不是拿 Crc16
   //   重算一遍再比对 —— 那是循环验证: 只能证明"覆盖范围和测试里写的一致",
   //   证明不了"和协议约定一致"。错得自洽的实现照样通过。
+  // ⚠️ 2026-09-23 首次编译+跑测: 这两个常量**漏跟 2026-09-22 的状态标志字节改动**
+  //    (0x9955 / 0xFAD7 恰好是状态字节仍为 `0x01` 那一版 payload 的整帧 CRC ——
+  //    用上面那段独立 Python 实现把第 25 字节改回 0x01 即可复现)。
+  //    golden hex 当时更新了, 这里没有, 于是"实现对了、测试红了"。
+  //    下面两个值是用同一段独立 Python 实现在**当前** golden 帧上重算的, 不是抄实现输出。
   const Crc16 calc(enc.config());
-  EXPECT_EQ(0x9955, calc.compute(r.bytes.data(), n - kCrcBytes));      // 覆盖到 payload 末尾
-  EXPECT_EQ(0xFAD7, calc.compute(r.bytes.data(), n - kCrcBytes - 1));  // 少覆盖一个字节
+  EXPECT_EQ(0xA0A1, calc.compute(r.bytes.data(), n - kCrcBytes));      // 覆盖到 payload 末尾
+  EXPECT_EQ(0x89A0, calc.compute(r.bytes.data(), n - kCrcBytes - 1));  // 少覆盖一个字节
 
-  EXPECT_EQ(0x9955, trailing_crc(r.bytes));   // 帧尾两字节确实就是整帧 CRC
+  EXPECT_EQ(0xA0A1, trailing_crc(r.bytes));   // 帧尾两字节确实就是整帧 CRC
 }
 
 TEST(FrameLayoutTest, 心跳帧)

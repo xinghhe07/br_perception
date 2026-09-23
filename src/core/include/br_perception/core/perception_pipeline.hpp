@@ -347,6 +347,26 @@ private:
   bool transform_lidar_to_world(const br_perception::msg::LidarResult& in,
                                 br_perception::msg::PerceptionFrame& out);
 
+  /// @brief 一帧的"显著特征"：只回答"与上次相比变没变"
+  ///
+  /// ⚠️ 只存**判据用得到的那几项**，不存整帧 —— 存整帧会让这个结构随消息一起
+  ///    长大，还要深拷贝。
+  /// ⚠️ 定义**必须在这里**（而不是挪到 `last_sig_` 旁边）：它出现在下面
+  ///    `make_signature` / `scene_changed` 的签名里，C++ 要求嵌套类型先声明后使用。
+  ///    2026-09-23 首次编译实测：定义放后段会报 "PublishSignature does not name a type"。
+  struct PublishSignature {
+    bool        valid{false};          ///< 还没有过上一帧时为 false
+    size_t      obstacle_count{0};     ///< 障碍物个数变了就算变
+    double      nearest_obstacle_m{-1.0};  ///< 最近障碍物距离 [m]；<0 = 没有障碍物
+    uint8_t     mode{0};               ///< 降级模式翻转（含 kNormal ↔ kLidarOnly）
+    /// 建筑位状态：`(spot_id, state)` 的排序列表 —— 塔状态翻转（EMPTY↔TOWER）
+    /// 是**比赛里最要紧的事件之一**，必须能触发补帧
+    std::vector<std::pair<uint32_t, uint8_t>> spot_states;
+    /// 柱顶有无物体：穆斯蒂卡"被取走/被放回"的信号
+    bool        mustika_pillar_occupied{false};
+    bool        core_pillar_occupied{false};
+  };
+
   /// @brief 由**原始雷达数据**算"场景显著特征" —— **刻意不做 TF、不组帧**
   ///
   /// ⚠️ 为什么用原始数据而不是组好的帧（2026-09-22 用户复核 P1-6）：
@@ -498,21 +518,7 @@ private:
   std::array<std::chrono::steady_clock::time_point, 5> fail_warn_time_{};
 
   /// @brief 上一次**实际发出去**的帧的"显著特征"（事件补帧的比对基准）
-  ///
-  /// ⚠️ 只存**判据用得到的那几项**，不存整帧 —— 目的只是回答"变没变"，
-  ///    存整帧会让这个结构随消息一起长大，还要深拷贝。
-  struct PublishSignature {
-    bool        valid{false};          ///< 还没有过上一帧时为 false
-    size_t      obstacle_count{0};     ///< 障碍物个数变了就算变
-    double      nearest_obstacle_m{-1.0};  ///< 最近障碍物距离 [m]；<0 = 没有障碍物
-    uint8_t     mode{0};               ///< 降级模式翻转（含 kNormal ↔ kLidarOnly）
-    /// 建筑位状态：`(spot_id, state)` 的排序列表 —— 塔状态翻转（EMPTY↔TOWER）
-    /// 是**比赛里最要紧的事件之一**，必须能触发补帧
-    std::vector<std::pair<uint32_t, uint8_t>> spot_states;
-    /// 柱顶有无物体：穆斯蒂卡"被取走/被放回"的信号
-    bool        mustika_pillar_occupied{false};
-    bool        core_pillar_occupied{false};
-  };
+  ///        ⚠️ 结构体本身定义在类体前段（`transform_lidar_to_world` 之后）。
   PublishSignature last_sig_;
 
   /// @brief 上次**事件补帧**的时刻（单调时钟）—— 防抖动闸，见
