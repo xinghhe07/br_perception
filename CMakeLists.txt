@@ -249,6 +249,39 @@ ament_target_dependencies(coordinate_transformer
   tf2 tf2_ros tf2_geometry_msgs)
 
 # ═══════════════════════════════════════════════════════════════════════════
+# 12b. MustikaPillarCheck — 最小融合「穆斯蒂卡在柱上吗」(任务书 §15.5, 模块 20 第一刀)
+#
+#      相机检测到球 → TF 投影到 world → 与雷达的柱位比对 → 确认"在柱上"。
+#      值多少分: 规则 4.5.1 —— TR 取五色石的前置是圣所使命达成, 而"柱上有没有球"
+#      是 §3.0.1 表里点名的得分动作 (**250 分**)。
+#
+#      ⚠️ 它**只用只读 TF**（`tf2_ros::Buffer` + `TransformListener`），
+#         **不起 `CoordinateTransformer`** —— 那个类构造时会广播 TF,
+#         而 perception_pipeline 已经起了一个, 再来一个就是第三个广播同一条变换
+#         ⇒ tf2 刷 TF_REPEATED_DATA。详见该节点头文件的成员注释。
+#
+#      ⚠️ **补这个目标是 2026-09-23 的一处真缺口**：
+#         `.cpp` 写了、`bringup_full` 也挂了, 但 CMake 里**零命中** ⇒
+#         不编译、不注册、不 install ⇒ 一 launch 就报 "executable not found",
+#         而那是**运行期假故障**, 会把真正的编译错误信号盖住。
+#         （教训：**"文件写完"和"接进构建"是两件事** —— 与"写完即断链"同类。）
+# ═══════════════════════════════════════════════════════════════════════════
+# ⚠️ 不走 `add_lidar_component` 宏（它无条件链 PCL，而本节点不碰点云）。
+#    ⚠️ 依赖列表**照抄 `perception_pipeline_component` 那套已验证的组合**
+#       （含 tf2/tf2_ros/tf2_geometry_msgs）—— 本节点直接 include tf2_ros 的头，
+#       少一个就可能报"找不到 tf2_ros/buffer.h"。
+add_library(mustika_pillar_check_component SHARED
+  src/fusion/mustika_pillar_check.cpp)
+ament_target_dependencies(mustika_pillar_check_component
+  rclcpp rclcpp_components std_msgs diagnostic_msgs geometry_msgs
+  tf2 tf2_ros tf2_geometry_msgs)
+target_link_libraries(mustika_pillar_check_component
+  ${cpp_typesupport_target})
+rclcpp_components_register_node(mustika_pillar_check_component
+  PLUGIN "br_perception::fusion::MustikaPillarCheck"
+  EXECUTABLE mustika_pillar_check)
+
+# ═══════════════════════════════════════════════════════════════════════════
 # 13. Livox CustomMsg ↔ PointCloud2 桥接节点
 #     仿真: Gazebo PointCloud2 → CustomMsg → Point-LIO (与实机同走 lidar_type=1)
 #     实机: 驱动 CustomMsg → PointCloud2 → 感知管线 (§3)
@@ -437,6 +470,7 @@ install(TARGETS
   camera_depth
   camera_perception_node
   perception_pipeline
+  mustika_pillar_check
   comm_node
   DESTINATION lib/${PROJECT_NAME})
 
@@ -456,6 +490,7 @@ install(TARGETS
   camera_depth_component
   camera_perception_component
   perception_pipeline_component
+  mustika_pillar_check_component
   coordinate_transformer
   common_utils
   communication

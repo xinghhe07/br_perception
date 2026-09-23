@@ -160,7 +160,9 @@ comm_node:
     #    唯一事实源是 `config/debug_flags.yaml`（理由同 lidar_params.yaml 里那段 ——
     #    两处同名键靠 launch 顺序定值，是脆的，且漏传时**症状上碰巧是对的**，
     #    会把"接线漏了"掩盖掉）。
-    # ⚠️ **接线缺口**：`comm_node` 目前**不在任何 launch 里**。它接进 launch 那天
-    #    **必须把 debug_flags.yaml 也传给它** —— 否则本节点读不到总闸，
-    #    会用到自己的默认值 `false`，看起来是对的，但总闸对它其实不生效。
+    # ✅ 2026-09-23 **接线完成**：`comm_node` 已挂进 `bringup_full.launch.py`（第 7 节，
+    #    可用 `comm:=false` 关掉），并把 `debug_flags.yaml` 一起传给了它。
+    #    ⚠️ 在此之前它**不在任何 launch 里** —— 而 `bringup_full` 是**比赛模式**，
+    #       也就是说那条链起完是"一条完整的、什么都不输出的链"。
+    #       ⚠️ 若将来把它挂到别的 launch，**记得连带传 debug_flags.yaml**。
     debug_interval_sec: 2.0

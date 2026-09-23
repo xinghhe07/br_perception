@@ -350,8 +350,8 @@ private:
   // ═══════════════════════════════════════════════════════════════════════
   // 参数 — 地面分割
   // ═══════════════════════════════════════════════════════════════════════
-  double ransac_dist_thresh_{0.04};
-  int    ransac_max_iters_{100};
+  double ransac_distance_threshold_{0.04};
+  int    ransac_max_iterations_{100};
   double ransac_eps_angle_{0.45};
   bool   enable_normal_constraint_{true};
   double normal_angle_threshold_{0.15};
@@ -413,7 +413,7 @@ private:
   double column_z_max_{1.5};
   int    min_spot_points_{5};
   double top_surface_tolerance_{0.03};
-  int    top_surface_min_pts_{3};
+  int    top_surface_min_points_{3};
   double empty_max_height_{0.05};
   double one_earth_min_{0.20},  one_earth_max_{0.45};
   double two_earth_min_{0.55},  two_earth_max_{0.80};

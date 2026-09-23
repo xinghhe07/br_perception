@@ -71,8 +71,12 @@ def generate_launch_description():
     SENSOR_TF = [
         ('livox_frame',        0.0,   0.0, 0.2419, 0.0, 0.0, 0.0),
         ('imu_link',           0.0,   0.0, 0.1119, 0.0, 0.0, 0.0),
+        # ⚠️ 2026-09-23: tele 原为 `-0.1 … yaw 3.14159`（车尾、朝后），随
+        #    `models/fishbot/model.sdf` 一起改成"**都朝前**"（实机是一宽一长焦、都朝 +x）。
+        #    两处**必须一致** —— 本表就是照 SDF 的 <pose> 抄的，改一边不改另一边，
+        #    TF 查出来的相机位姿就与图像实际朝向不符，而 transform_to_world 会照错不误。
         ('camera_wide_frame', 0.1,   0.0, 0.1669, 0.0, 0.0, 0.0),
-        ('camera_tele_frame', -0.1,   0.0, 0.1669, 0.0, 0.0, 3.14159),
+        ('camera_tele_frame', 0.1,   0.0, 0.1669, 0.0, 0.0, 0.0),
         ('camera_depth_frame', 0.105, 0.0, 0.125,  0.0, 0.0, 0.0),
     ]
     static_tfs = [

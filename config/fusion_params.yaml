@@ -22,8 +22,10 @@
     odom_frame: "odom"                       # 里程计坐标系 (§4.1; 文档 §1.5 表未列, 本处补)
     robot_base_frame: "base_link"            # 机器人基座
     lidar_frame: "livox_frame"               # 雷达 (Livox Mid-360 出厂 frame_id)
-    camera_wide_frame: "camera_wide_frame" # 前相机
-    camera_tele_frame: "camera_tele_frame"   # 后相机
+    camera_wide_frame: "camera_wide_frame" # 宽角相机
+    # ⚠️ 2026-09-23 更正: 原写"后相机" —— 那是"前/后双相机"时代的残留,
+    #    与下方 `static_tf:` 块里 tele 已是"两路都朝前"自相矛盾（任务书 §0: 一宽一长焦）。
+    camera_tele_frame: "camera_tele_frame"   # 长焦相机（**朝前**，不是后相机）
 
     # ═══════════════════════════════════════════════════════════════════════
     # 里程计接口 — coordinate_transformer (模块 17)
@@ -113,8 +115,89 @@
         translation: [0.0, 0.0, 0.25]    # ⚠ 占位: 雷达相对 base_link 的安装位置 (m)
         rotation_rpy: [0.0, 0.0, 0.0]    # ⚠ 占位: roll/pitch/yaw (rad)
       camera_wide_frame:
-        translation: [0.15, 0.0, 0.35]   # ⚠ 占位: 与 camera_params.yaml extrinsics 一致
+        # ⚠ 占位。⚠️ 2026-09-23 更正: 原文写"与 camera_params.yaml extrinsics 一致"——
+        #    内外参已于 **2026-09-21 拆到 `config/camera_hardware.yaml`**, 那个文件里没有。
+        translation: [0.15, 0.0, 0.35]
         rotation_rpy: [0.0, 0.0, 0.0]
       camera_tele_frame:
-        translation: [-0.15, 0.0, 0.35]  # ⚠ 占位
-        rotation_rpy: [0.0, 0.0, 3.14159]
+        # ⚠️ 2026-09-23 语义修正: 原为 `[-0.15, …] + rpy[0,0,3.14159]`(装在车尾、朝后),
+        #    那是"前/后双相机"的遗留; 实机是**一宽一长焦、两路都朝前**(任务书 §0)。
+        #    平移仍是占位(真实间距未标定), 与 wide 共用挂点。
+        translation: [0.15, 0.0, 0.35]
+        rotation_rpy: [0.0, 0.0, 0.0]
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# mustika_pillar_check — 最小融合「穆斯蒂卡在柱上吗」(任务书 §15.5, 模块 20 第一刀)
+#
+# ⚠️ 与上面的 `/**` 块**是两个作用域**：`/**` 对所有节点生效，
+#    本块只对**节点名 = `mustika_pillar_check`** 的那个节点生效
+#    （仓库体例同 `comm_node:` / `perception_pipeline:`）。
+#
+# ⚠️⚠️ **`extrinsics_calibrated` 是个人工闸，默认 false**：
+#    为 false 时本节点**只发残差诊断、状态恒发 0=未知**。
+#    理由：内参(focal_px 等)与 TF 里的外参**目前都是占位值** ——
+#    用占位外参算出的"位置一致"是**巧合**，而本节点最危险的地方就是
+#    **它可能碰巧对、然后被当成标定过了**。
+#    ⇒ 标定完成后**显式改成 true** —— 让"开始信任它"是一个明确动作。
+# ═══════════════════════════════════════════════════════════════════════════════
+mustika_pillar_check:
+  ros__parameters:
+    # ── 输入 ──
+    wide_topic:  "/perception/camera/mustika_wide"
+    tele_topic:  "/perception/camera/mustika_tele"
+    lidar_topic: "/perception/lidar/result"
+
+    # ── 输出 ──
+    state_topic: "/perception/fusion/mustika_state"   # ⚠️ perception_pipeline 订阅它
+    diag_topic:  "/perception/fusion/mustika_check"
+
+    # ── ⚠️⚠️ 人工闸：外参是否已标定（见上方大段说明）──
+    extrinsics_calibrated: false
+
+    # ── 坐标系（⚠️ 必须与上面 `static_tf:` 块里的 frame 名逐字一致）──
+    world_frame: "world"
+    camera_frames: ["camera_wide_frame", "camera_tele_frame"]
+
+    # ── 内参（⚠️ 占位值；事实源在 config/camera_hardware.yaml，标定脚本读写那边）──
+    #    ⚠️ 长度必须 = 2（宽/长焦）。长度不符会让整组被忽略并回落默认。
+    #    ⚠️ 这是一笔**已知债**：内参有两处（这里 + camera_hardware.yaml），
+    #       标定后要人工改两处。正解见 doc/模块进度.md（标定脚本多写一份 params 文件）。
+    focal_px: [800.0, 2380.0]     # ⚠️ 占位
+    cx_px:    [640.0, 640.0]      # ⚠️ 占位
+    cy_px:    [360.0, 360.0]      # ⚠️ 占位
+
+    # ── 球 ──
+    #    ⚠️ 直径口径**未拍板**：ABU v1.1 原文是排球(Mikasa V300W Ø≈210)，
+    #       而国内赛规则 V1 写的是 4 号室内五人制足球(Ø约200, 色号 218-165-32)。
+    ball_diameter_m: 0.21
+    # ⚠️ 球**坐在**柱顶 Ø180 凹槽口上时，球心比柱顶高多少 [m]
+    #    **事实源是 config/field_geometry.yaml 的
+    #    objects.mustika.seated_on_receptacle.center_above_pillar_top（现 = 0.054）** ——
+    #    改那边时把这个一起改（球径一改，这个值就跟着变）
+    ball_center_above_pillar_top_m: 0.054
+
+    # ── 判据 ──
+    pos_tolerance_m:     0.35     # 通过门槛：水平残差超它就不算"对上"
+    height_tolerance_m:  0.15     # 高度门槛
+    residual_max_m:      0.50     # ⚠️ "**明确反对**"门槛，**必须 ≥ pos_tolerance_m**
+                                  #    （反了会出现"既通过又反对"的重叠区间）
+                                  #    也是翻 `extrinsics_calibrated` 那道闸的**数字依据**：
+                                  #    标定时盯诊断里的 residual，收到 < 阈值再翻
+    min_confidence:      0.5      # 检测置信度下限
+    min_radius_px:       8.0      # 单目测距的绝对下限（另有一条由容差推出的下限，取二者较大）
+    radius_noise_px:     1.0      # 像素半径测量噪声，供推导用
+    cross_check_rel:     0.3      # 两路距离差超 30% → 降级为未知（相机之间都打架）
+    stale_sec:           1.0      # 相机/雷达数据超过它就当"没有"
+    # ⚠️ TF 查询超时 [s] —— **别给 0**（tf2 的默认值）。TF 由 coordinate_transformer
+    #    按里程计时间戳广播，本节点按消息时间戳查，两边跨进程；给 0 时缓冲区还没包住
+    #    该时刻就直接抛 ExtrapolationException → 判未知，而症状写成"雷达柱位不可得"，
+    #    会把现场引去查雷达。
+    #    ⚠️ 与 `/**` 块里 `coordinate_transformer` 的 `tf_timeout_sec` **同值同义**，改一处要改两处。
+    tf_timeout_sec:      0.05
+
+    # ── "掉落"判据（⚠️ 两条**同时**满足才算，见 .cpp 里的说明）──
+    #    只满足"远离"可能是球被 TR/BR 拿走了 —— 那种本节点看不到，只能判未知。
+    fallen_dist_m:       0.8
+    fallen_height_max_m: 0.4
+
+    publish_rate_hz:     2.0

@@ -117,16 +117,19 @@
     self_radius_z:                 1.20   # 机器人高
 
     # ═══════════════════════════════════════════════════════════════════════
-    # ⚠️ 2026-09-20: 以下 3 个是**重复实现的别名键**, 两边都要留
+    # ✅ 2026-09-23 **别名键已删**（原先这里挂着 3 个 `≡` 键）
     #
-    # 由来: 本仓库的雷达层有**两份实现**在读同名参数, 但键名不一致 ——
-    #   · `lidar_perception_node.cpp` (独立节点, 1573 行)  读 ransac_dist_thresh / top_surface_min_pts
-    #   · `ground_segmenter.cpp` / `building_spot_analyzer.cpp` (组件, 被节点复用) 读 ransac_distance_threshold / top_surface_min_points
-    # 这两份是**同一套代码的两个副本**(台账 §六 已记为技术债, 容器化重构时要消掉)。
-    # 在消掉之前, **两个名字都必须存在**, 否则被弃用的那一半会静默读到代码默认值。
+    # 原状: 雷达层有**两份实现**在读同一个参数但**键名不一致** ——
+    #   · `lidar_perception_node.cpp`(单体) 读 ransac_dist_thresh / ransac_max_iters / top_surface_min_pts
+    #   · `ground_segmenter.cpp` / `building_spot_analyzer.cpp`(组件) 读
+    #     ransac_distance_threshold / ransac_max_iterations / top_surface_min_points
+    # 所以三个参数各挂了**两个名字**，靠"两个都写、值一样"维系 ——
+    # 那是**两处真源**：改一个忘一个，被弃用的那一半就**静默退回代码默认值**。
     #
-    # 处置: 容器化重构做完后, 删掉本段, 只留组件侧的名字。
+    # 处置（已做）: **把单体侧统一到组件的名字**，然后删掉别名。
+    #   ⚠️ 是行为保持的 —— 删之前逐对核过值一致（0.04/0.04、100/100、3/3）。
+    #   ⚠️ 顺带也把"容器化重构后再删"这个**挂账条件解除了**：现在就可以删，
+    #      因为两份实现读的是同一个名字了（重构要消的是**实现**的重复，不是名字）。
+    # ⚠️ 别再往这里加 `≡` 别名键。要用新参数，**两边代码用同一个名字声明**。
     # ═══════════════════════════════════════════════════════════════════════
-    ransac_dist_thresh:            0.04   # ≡ ransac_distance_threshold (独立节点侧)
-    ransac_max_iters:              100    # ≡ ransac_max_iterations  (独立节点侧)
-    top_surface_min_pts:           3      # ≡ top_surface_min_points (独立节点侧)
+    # （三种名字统一后的键就在上面各自的段落里，本段不再重复列出）

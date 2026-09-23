@@ -18,8 +18,8 @@ gazebo --verbose .../scripts/out/gazebo/worlds/br_field.world
 | 传感器 | 话题 |
 |---|---|
 | 3D 雷达(GPU ray, 10Hz) | `/livox/lidar/pointcloud` |
-| 前相机(30Hz) | `/camera_front/image_raw` |
-| 后相机(30Hz) | `/camera_rear/image_raw` |
+| 宽角相机(30Hz, hfov 1.10) | `/camera_wide/image_raw` |
+| 长焦相机(30Hz, hfov 0.40) | `/camera_tele/image_raw` |
 | IMU(100Hz) | `/imu/data` |
 
 这些话题名与 `src/lidar/lidar_preprocessor.cpp` 订阅的 `/livox/lidar/pointcloud`、

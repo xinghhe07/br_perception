@@ -70,6 +70,26 @@ inline bool throttled(std::chrono::steady_clock::time_point& last, double ws)
   return DS::WARN;
 }
 
+/// @brief 降级模式的**给人读的说明** —— 与 `PerceptionPipeline::mode_name()` 不同：
+///        这里会把"**这个模式当前有没有输出**"一并说清
+///
+/// ⚠️⚠️ 为什么不能只印 `mode_name`（2026-09-23 复核指出）：
+///    `kVisionOnly` 听起来像"降级后仍可用"，而**实际是一帧都不发**（雷达停 = 没有
+///    3D 内容，相机是 2D、要融合层才有用，而融合层没写）。
+///    只印 `VISION_ONLY` ⇒ **诊断在撒谎**，而主控侧看到的是"完全收不到" ——
+///    现场会往"链路断了"去查，查错方向。
+///    ⚠️ **两处诊断（帧内 + 降级）共用本函数**，别各写一份（同 `diag_level_of` 的教训）。
+[[nodiscard]] std::string mode_message(uint8_t mode)
+{
+  std::string s = PerceptionPipeline::mode_name(mode);
+  if (mode == PerceptionPipeline::kVisionOnly) {
+    s += " —— ⚠️ 本模式当前**不发帧**"
+         "（雷达停 = 没有 3D 内容；相机是 2D，要融合层(模块21,未写)才有用）。"
+         "主控侧看到的是「完全收不到」，别去查链路";
+  }
+  return s;
+}
+
 }  // namespace
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -121,6 +141,7 @@ PerceptionPipeline::PerceptionPipeline(const rclcpp::NodeOptions& options)
   this->declare_parameter<std::string>("lidar_topic",       lidar_topic_);
   this->declare_parameter<std::string>("camera_topic",      camera_topic_);
   this->declare_parameter<std::string>("comm_diag_topic",   comm_diag_topic_);
+  this->declare_parameter<std::string>("fusion_state_topic", fusion_state_topic_);
   this->declare_parameter<std::string>("output_topic",      output_topic_);
   this->declare_parameter<std::string>("emergency_stop_topic", emergency_stop_topic_);
   this->declare_parameter<std::string>("degradation_topic", degradation_topic_);
@@ -150,6 +171,7 @@ PerceptionPipeline::PerceptionPipeline(const rclcpp::NodeOptions& options)
   this->get_parameter("lidar_topic",         lidar_topic_);
   this->get_parameter("camera_topic",        camera_topic_);
   this->get_parameter("comm_diag_topic",     comm_diag_topic_);
+  this->get_parameter("fusion_state_topic",  fusion_state_topic_);
   this->get_parameter("output_topic",        output_topic_);
   this->get_parameter("emergency_stop_topic", emergency_stop_topic_);
   this->get_parameter("degradation_topic",   degradation_topic_);
@@ -210,6 +232,16 @@ PerceptionPipeline::PerceptionPipeline(const rclcpp::NodeOptions& options)
   sub_comm_diag_ = this->create_subscription<diagnostic_msgs::msg::DiagnosticArray>(
     comm_diag_topic_, rclcpp::QoS(10),
     std::bind(&PerceptionPipeline::on_comm_diag, this, std::placeholders::_1));
+
+  // 融合层的穆斯蒂卡状态（发布端 = mustika_pillar_check，模块 20）。
+  // ⚠️ 现在还没有发布者 → 这一路恒不触发 → `mustika_state` 仍是 0=未知，
+  //    **与补这条之前的行为完全一致**（补的是链路，不是行为）。
+  // ⚠️ 发布端用默认 QoS(RELIABLE depth 10) 还是 best_effort？—— 见那个节点的实现。
+  //    这里取 `rclcpp::QoS(10)`（RELIABLE）是**安全侧**：它兼容 RELIABLE 与
+  //    BEST_EFFORT 两种发布者，而 RELIABLE 订阅遇上 BEST_EFFORT 发布才是那个静默坑。
+  sub_fusion_state_ = this->create_subscription<std_msgs::msg::UInt8>(
+    fusion_state_topic_, rclcpp::QoS(10),
+    std::bind(&PerceptionPipeline::on_fusion_state, this, std::placeholders::_1));
 
   // ── 发布 ──
   // ⚠️ 输出帧用 **RELIABLE**（`rclcpp::QoS(10)`）：它是**控制相关**的包内接口，
@@ -309,6 +341,41 @@ void PerceptionPipeline::on_camera_frame(
   }
 
   try_publish(/*is_event=*/true);
+}
+
+void PerceptionPipeline::on_fusion_state(const std_msgs::msg::UInt8::SharedPtr msg)
+{
+  if (!msg) return;
+
+  // ⚠️ **只认上游定义域内的三档**（`mustika_pillar_check::State`）：
+  //    0=未知 / 1=在柱上 / 5=掉落。
+  //    其余值（2=TR转运中 / 3=BR持有 / 4=已供奉 / 6=重试归还中）**它判不了** ——
+  //    收到就说明上游超出了自己的定义域。**丢弃并降级为 0**，
+  //    别把不认识的值透传给主控（主控会按那档去动作）。
+  const uint8_t v = msg->data;
+  if (v != 0u && v != 1u && v != 5u) {
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+      "融合状态收到定义域外的值 %u（只认 0=未知 / 1=在柱上 / 5=掉落）→ 丢弃，按未知处理。"
+      "去查 `mustika_pillar_check` 到底发了什么", static_cast<unsigned>(v));
+    return;   // ⚠️ **不更新 last_fusion_state_** —— 保留旧值，让它按超时自然变未知
+  }
+
+  last_fusion_state_ = v;
+  fusion_state_at_ = std::chrono::steady_clock::now();
+
+  // ⚠️⚠️ **必须 mark_seen**（2026-09-23 复核抓出的诊断自相矛盾）：
+  //    补调用之前，`refresh_states()` 里 kSrcFusion 那一路**没人喂时间戳** ⇒
+  //    它恒为 NEVER("未接入, 不是故障")，而同一份诊断里 `mustika_state` 却标着
+  //    "(来自融合层)" —— **同一张表里两句话互相打脸**。
+  //    现场的后果不是"少一条信息"：人会据此认定"融合层其实没起来，这个 1 是假的"，
+  //    从而**不信任一个真结论** —— 那 250 分的动作就丢在这里（§零 的"准"）。
+  //
+  //    ⚠️ healthy 给 `true`：`mustika_pillar_check` 周期发 `0=未知` 是**它的正常输出**
+  //       （"判不了"是合法结论），不是故障。新鲜度交给 `fusion_timeout_sec_` 判 ——
+  //       收到过之后停发，`refresh_states()` 会把它推成 STALE。
+  //    ⚠️ **定义域外的值不走这里**（上面已经 return）—— 与 comm 那路同口径：
+  //       宁可让它按超时变 STALE，也不拿一个读不懂的值冒充"健康"。
+  mark_seen(kSrcFusion, true);
 }
 
 void PerceptionPipeline::on_comm_diag(
@@ -777,8 +844,23 @@ std::optional<br_perception::msg::PerceptionFrame> PerceptionPipeline::assemble_
 
   // ── ⚠️⚠️ 本节点**填不了**的字段（逐条理由见头文件那张表）──
   //
-  // `mustika_state = 0`：**0 是消息里明确定义的"未知"档**，是**真哨兵**，可以用。
-  frame.mustika_state = 0;   // 0 = 未知（归融合层，模块 20/21）
+  // `mustika_state`：**来自融合层**（`mustika_pillar_check`，模块 20）。
+  // ⚠️ 2026-09-23 起**不再写死 0** —— 改订阅 `/perception/fusion/mustika_state`。
+  //    在补这条订阅之前，那个节点的结论**再对也到不了这里**（它零消费者）。
+  //
+  // ⚠️ **三档回退规则**（和它去未知的逻辑一致）：
+  //    · 收到过、且没过 `fusion_timeout_sec_` → 用它的值（0/1/5）
+  //    · **没收到过 / 已超时** → `0 = 未知`
+  //    ⚠️ 超时**退回未知，而不是"保持上一次的结论"** —— 旧结论比没有结论危险
+  //       （球可能早被拿走了，而主控会照"在柱上"去派 TR）。
+  {
+    const bool fresh =
+        !tp_unset(fusion_state_at_) &&
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - fusion_state_at_).count()
+            <= fusion_timeout_sec_;
+    // ⚠️ **0 是消息里明确定义的"未知"档**，是真哨兵，不是"没填" —— 可以放心用
+    frame.mustika_state = fresh ? last_fusion_state_ : 0u;
+  }
   //
   // `mustika_pose`：⚠️ **零值 PoseStamped 在协议里是一个合法的世界坐标 (0,0,0)
   //   = 场地西南角**，编码器会照发 int16 cm、主控会照用。这不是"不填"，是**伪造位置**。
@@ -809,12 +891,12 @@ std::optional<br_perception::msg::PerceptionFrame> PerceptionPipeline::assemble_
     const uint8_t mode = decide_mode();
     // ⚠️ 等级走**唯一的** `diag_level_of()`，与降级诊断**同一个口径**（P1-4）
     st.level = diag_level_of(mode);
-    st.message = mode_name(mode);
+    st.message = mode_message(mode);   // ⚠️ 不是 mode_name —— 见该函数的注释
 
     auto kv = [](const std::string& k, const std::string& v) {
       diagnostic_msgs::msg::KeyValue p; p.key = k; p.value = v; return p;
     };
-    st.values.push_back(kv("mode", mode_name(mode)));
+    st.values.push_back(kv("mode", mode_message(mode)));
     // 逐路点名 —— 现场排查全靠这个，**不要只报一个"降级了"**
     for (size_t i = 0; i < kSrcCount; ++i) {
       st.values.push_back(kv(std::string("src_") + source_name(i),
@@ -825,6 +907,12 @@ std::optional<br_perception::msg::PerceptionFrame> PerceptionPipeline::assemble_
     st.values.push_back(kv("held_object_count",           "NOT PROVIDED BY PERCEPTION"));
     // ⚠️ 融合层没实现 → 恒 true，是**预期**（任务书 §6.1 的"融合异常→透传雷达"）
     st.values.push_back(kv("fusion_bypass", "1 (模块21未实现, 预期行为)"));
+    // ⚠️ mustika_state 来自融合层，**必须能看出它是"真值"还是"回退的未知"** ——
+    //    否则现场看到 0 会分不清"球不在"与"融合层没给出结论"（而 0 的定义是后者）。
+    st.values.push_back(kv("mustika_state",
+                           std::to_string(frame.mustika_state) +
+                               (tp_unset(fusion_state_at_) ? " (融合层从未给过 → 回退未知)"
+                                                           : " (来自融合层)")));
     // ⚠️ 帧内诊断也给一份**失败原因分类**（与降级诊断同源，见 P0-1）：
     //    主控收到帧时若发现"帧突然不来了"，这一条能立刻告诉它该往哪查。
     st.values.push_back(kv("fail_no_lidar",       std::to_string(fail_counts_[kFailNoLidar])));
@@ -918,7 +1006,10 @@ void PerceptionPipeline::publish_degradation_state()
   diagnostic_msgs::msg::DiagnosticStatus st;
   st.name        = "perception_pipeline/degradation";
   st.hardware_id = "camera+mid360";
-  st.message     = mode_name(mode);
+  // ⚠️ **必须走 `mode_message` 而不是 `mode_name`** —— 后者只印 `VISION_ONLY`，
+  //    会让人读成"降级后仍可用"，而那个模式**实际一帧都不发**。
+  //    理由与两处共用的原因见 `mode_message` 的注释。
+  st.message = mode_message(mode);
 
   // ⚠️⚠️ 等级**不能**因为某路是 NEVER 就报 WARN/ERROR（2026-09-22 用户要求）：
   //    融合层（模块 21）**今天就是不存在的**，`fusion` 会长期是 NEVER。
@@ -938,7 +1029,10 @@ void PerceptionPipeline::publish_degradation_state()
   auto kv = [](const std::string& k, const std::string& v) {
     diagnostic_msgs::msg::KeyValue p; p.key = k; p.value = v; return p;
   };
-  st.values.push_back(kv("mode", mode_name(mode)));
+  // ⚠️ 与 `st.message` 同源（`mode_message`）—— 两处印同一个模式名却一个有说明、
+  //    一个没有，正是"同一状态两套说法"（同 P1-4 修过的那个坑）。字符串仍以
+  //    `VISION_ONLY` 开头，**grep 照样能搜到**。
+  st.values.push_back(kv("mode", mode_message(mode)));
   for (size_t i = 0; i < kSrcCount; ++i) {
     std::string note = state_name(health_[i].state);
     // 把"未接入"与"死了"在**文字上**分开 —— 两者在数值上都不可用，

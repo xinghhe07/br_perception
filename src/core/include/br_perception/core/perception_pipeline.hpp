@@ -44,13 +44,25 @@
 ///   | `building_spots` / `obstacles` | 透传 `LidarResult`，**TF 到 world** | ✅ 可信（位置不可得时不发，见下） |
 ///   | `diagnostics` | 本节点 + 各路降级状态 | ✅ 可信 |
 ///   | `seq` | 自增 | ✅ 可信 |
-///   | `mustika_state` | `0` = **消息自带的"未知"档** | ✅ 真哨兵，可以用 |
+///   | `mustika_state` | **来自融合层**（订阅 `/perception/fusion/mustika_state`）；没收到/超时 → `0 = 未知` | ✅ 见下方说明 |
 ///   | `mustika_pose` | 零值 **+ `mustika_state = 0`** | ⚠️ **需协议兜底**：见下 |
 ///   | `sanctuary_mandate_fulfilled` | **不发**（见下） | ❌ **需协议改** |
 ///   | `held_object_count` | **不发**（见下） | ❌ **需协议改** |
 ///   | `holding_over_limit` | `0` | ⚠️ 可接受：风险不对称，恒 0 是**安全默认**（不会误报超限） |
 ///   | `match_remaining_sec` | 自计时（近似） | ⚠️ **需契约**：以主控计时为准 |
 ///   | `match_end_release_warning` | 自计时到点且有输入时置 1 | ⚠️ 保守 |
+///
+///   **`mustika_state` 的来路（2026-09-23 变更）**：
+///     原先本节点**写死 `0`**，理由是"归融合层" —— 但那条路**从来没接上过**：
+///     `mustika_pillar_check`（模块 20）会发 `/perception/fusion/mustika_state`，
+///     而本节点没有订阅它 ⇒ **那个节点的结论再对也到不了主控**。
+///     现在订阅了，取值规则三档回退（见实现）：
+///       · 收到过、没过 `fusion_timeout_sec_` → 用它的 **0 / 1 / 5**
+///       · 没收到过 / 已超时 → **`0 = 未知`**
+///     ⚠️ 超时**退回未知，而不是"保持上一次的结论"**：球可能早被拿走了，
+///        而主控会照"在柱上"去派 TR。
+///     ⚠️ 诊断里会写明这个 `0` 是**"融合层给的真结论"**还是**"回退的未知"**——
+///        两者在数值上都是 0，但现场要做的事完全不同。
 ///
 ///   **三项必须落到协议文档里（只写在节点注释里没用 —— 编码器不读注释）**：
 ///
@@ -117,8 +129,9 @@
 ///
 /// ── 降级状态机（任务书 §6.1 那五条）──
 ///   逐条对着任务书：
-///     · 雷达断连   → `kLidarOnly` 的镜像：实际是**相机断**时的 `kLidarOnly`；
-///                    雷达断 → `kVisionOnly`（建筑位降级，靠相机）
+///     · 雷达断连   → `kVisionOnly`。⚠️ **但那个模式当前【一帧都不发】** ——
+///                    相机是 2D、要融合层才有 3D，而融合层没写。
+///                    **它是诊断标签，不是可用模式**，详见 `Mode::kVisionOnly` 的注释
 ///     · 相机断连   → `kLidarOnly`（天空方块顶面颜色本来就判不了，标 UNKNOWN —— 见
 ///                    `BuildingSpot.top_color`，雷达层**永远**发 UNKNOWN，不因降级而改变）
 ///     · 融合异常   → `fusion_bypass = true` → **透传雷达结果**。
@@ -200,6 +213,7 @@
 
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <std_msgs/msg/bool.hpp>
+#include <std_msgs/msg/u_int8.hpp>
 
 #include <array>
 #include <chrono>
@@ -250,7 +264,25 @@ public:
     kStarting  = 0,   ///< 还没收到**任何**环境传感器数据（启动初期，或话题全配错）
     kNormal    = 1,   ///< 雷达 + 相机都在线
     kLidarOnly = 2,   ///< 相机不可用 → 纯雷达
-    kVisionOnly= 3,   ///< 雷达不可用 → 纯视觉
+    /// @brief 雷达不可用 —— ⚠️⚠️ **但本节点当前在这个模式下【一帧都不发】**
+    ///
+    /// **这不是一个"能跑的模式"，它现在只是个诊断标签。**（2026-09-23 复核指出）
+    ///
+    /// 事实：雷达不 OK 时 `assemble_frame()` **直接返回空** ⇒ 零帧输出。
+    /// 理由是头文件"坐标系"那节的硬约束：相机给的是 **2D**，要经融合层投影成 3D
+    /// 才有用，而融合层（模块 21）还没实现 ⇒ **雷达一停，本节点就是没有 3D 内容**，
+    /// 如实不发比发一份旧的好。
+    /// ⇒ **下游从这个模式得不到任何东西**；主控侧的观感是"完全收不到"。
+    ///
+    /// ⚠️⚠️ 所以**别读成"降级后仍可用"**。它要变成**真模式**，前提是协议先能表达
+    ///     "**位置不可用，但状态照发**"（即 `0x01` 帧加 `pose_valid` 位）。
+    ///     在那之前，主控**无法区分**"雷达停了"与"整条链路断了"——
+    ///     而这两件事的应对**正相反**（一个该等感知，一个该急停失能）。
+    ///     本节点能做的只有：发 `emergency_stop` + 在诊断里**点名**。
+    ///
+    /// ⇒ 这一条已从"协议待办"升级为**本模式的成立条件**，
+    ///    见 `config/comm_params.yaml` 未冻结清单里的 `0x01` 状态位那条。
+    kVisionOnly= 3,
     kEmergency = 4,   ///< **曾经能用、现在两个环境传感器都没了**
     /// @brief ⚠️ **曾经能出 world 坐标、现在出不来了** → **零帧输出**
     ///
@@ -278,6 +310,15 @@ private:
   void on_lidar_result(const br_perception::msg::LidarResult::SharedPtr msg);
   void on_camera_frame(const br_perception::msg::CameraFrame::SharedPtr msg);
   void on_comm_diag(const diagnostic_msgs::msg::DiagnosticArray::SharedPtr msg);
+
+  /// @brief 融合层的穆斯蒂卡状态 → 转进 `PerceptionFrame.mustika_state`
+  ///
+  /// ⚠️ **原样转发，不做任何加工**：`mustika_pillar_check` 已经把
+  ///    "判不了说未知、判得了才说在柱上/掉落"的规矩守住了（见它头文件的三条边界）。
+  ///    本节点在这里再判一次，只会多出一处会漂移的判据。
+  /// ⚠️ **只认 0/1/5 三档**，其余值（2=TR转运中 … 6=重试归还中）说明上游超出了
+  ///    它自己的定义域 → **丢弃并降级为 0**，别把不认识的值透传给主控。
+  void on_fusion_state(const std_msgs::msg::UInt8::SharedPtr msg);
 
   /// @brief 定时器心跳：推进超时判定 → 组帧 → 发布
   void tick();
@@ -396,6 +437,11 @@ private:
   std::string lidar_topic_{"/perception/lidar/result"};
   std::string camera_topic_{"/perception/camera/frame"};
   std::string comm_diag_topic_{"/communication/diagnostics"};
+  /// @brief 融合层穆斯蒂卡状态话题（发布端 = `mustika_pillar_check`，模块 20）
+  ///        ⚠️ 它的新鲜度判据**复用 `fusion_timeout_sec_`**（下面「各路超时」那组里，
+  ///           不另立一个 —— 两个数指同一件事时迟早漂开）。
+  ///        ⚠️ 超时后退回 `0 = 未知`（**不是**"保持上一次的结论"）：旧结论比没结论危险
+  std::string fusion_state_topic_{"/perception/fusion/mustika_state"};
   std::string output_topic_{"/perception/output"};
   std::string emergency_stop_topic_{"/perception/emergency_stop"};
   std::string degradation_topic_{"/system/degradation_state"};
@@ -449,6 +495,18 @@ private:
   rclcpp::Subscription<br_perception::msg::CameraFrame>::SharedPtr      sub_camera_;
   rclcpp::Subscription<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr sub_comm_diag_;
 
+  /// @brief 融合层的穆斯蒂卡状态（`mustika_pillar_check` 的输出，模块 20）
+  ///
+  /// ⚠️⚠️ **这条订阅的意义是"把链接上"**（2026-09-23 补）：
+  ///    `mustika_pillar_check` 发 `/perception/fusion/mustika_state`，
+  ///    而在补这条之前**本节点根本没有订阅者** —— 也就是说那个节点就算写完，
+  ///    它的结论也**到不了 `PerceptionFrame`**，与当初 `/perception/output`
+  ///    **零发布者**是同一个形态（方向相反）。
+  ///    这正是 §零 第一宗旨"稳"那条要防的：**看着配好了，实际没接上**。
+  /// ⚠️ 现在还没有发布者 → 这一路恒为 NEVER → `mustika_state` 仍是 `0 = 未知`，
+  ///    **与今天的行为完全一致**（没引入任何回归）。
+  rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr sub_fusion_state_;
+
   rclcpp::Publisher<br_perception::msg::PerceptionFrame>::SharedPtr     pub_frame_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr                     pub_emergency_;
   rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr   pub_degradation_;
@@ -472,6 +530,11 @@ private:
   br_perception::msg::LidarResult::SharedPtr last_lidar_;
   /// @brief 最近一次 `CameraFrame` 的**时间戳**（本节点只关心它活没活）
   std::optional<rclcpp::Time> last_camera_stamp_;
+
+  /// @brief 融合层最近给的穆斯蒂卡状态（`0/1/5`；其余值不收，见 `on_fusion_state`）
+  uint8_t last_fusion_state_{0};
+  /// @brief 上面那个值是什么时候到的（**单调时钟**）—— 用来判"还新不新"
+  std::chrono::steady_clock::time_point fusion_state_at_{};
 
   bool emergency_active_{false};   ///< 当前是否处于紧急状态
   std::chrono::steady_clock::time_point last_emergency_pub_{};

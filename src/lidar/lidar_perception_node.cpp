@@ -76,8 +76,8 @@ LidarPerceptionNode::LidarPerceptionNode(const rclcpp::NodeOptions& options)
   this->declare_parameter<double>("roi_max_z", roi_max_z_);
 
   // ── 地面分割参数 ──
-  this->declare_parameter<double>("ransac_dist_thresh", ransac_dist_thresh_);
-  this->declare_parameter<int>("ransac_max_iters", ransac_max_iters_);
+  this->declare_parameter<double>("ransac_distance_threshold", ransac_distance_threshold_);
+  this->declare_parameter<int>("ransac_max_iterations", ransac_max_iterations_);
   this->declare_parameter<double>("ransac_eps_angle", ransac_eps_angle_);
   this->declare_parameter<bool>("enable_normal_constraint", enable_normal_constraint_);
   this->declare_parameter<double>("normal_angle_threshold", normal_angle_threshold_);
@@ -140,7 +140,7 @@ LidarPerceptionNode::LidarPerceptionNode(const rclcpp::NodeOptions& options)
   this->declare_parameter<double>("column_z_max", column_z_max_);
   this->declare_parameter<int>("min_spot_points", min_spot_points_);
   this->declare_parameter<double>("top_surface_tolerance", top_surface_tolerance_);
-  this->declare_parameter<int>("top_surface_min_pts", top_surface_min_pts_);
+  this->declare_parameter<int>("top_surface_min_points", top_surface_min_points_);
   this->declare_parameter<double>("empty_max_height", empty_max_height_);
   this->declare_parameter<double>("one_earth_min", one_earth_min_);
   this->declare_parameter<double>("one_earth_max", one_earth_max_);
@@ -163,8 +163,8 @@ LidarPerceptionNode::LidarPerceptionNode(const rclcpp::NodeOptions& options)
   GET("roi_min_x", roi_min_x_); GET("roi_max_x", roi_max_x_);
   GET("roi_min_y", roi_min_y_); GET("roi_max_y", roi_max_y_);
   GET("roi_min_z", roi_min_z_); GET("roi_max_z", roi_max_z_);
-  GET("ransac_dist_thresh", ransac_dist_thresh_);
-  GET("ransac_max_iters", ransac_max_iters_);
+  GET("ransac_distance_threshold", ransac_distance_threshold_);
+  GET("ransac_max_iterations", ransac_max_iterations_);
   GET("ransac_eps_angle", ransac_eps_angle_);
   GET("enable_normal_constraint", enable_normal_constraint_);
   GET("normal_angle_threshold", normal_angle_threshold_);
@@ -213,7 +213,7 @@ LidarPerceptionNode::LidarPerceptionNode(const rclcpp::NodeOptions& options)
   GET("column_z_min", column_z_min_); GET("column_z_max", column_z_max_);
   GET("min_spot_points", min_spot_points_);
   GET("top_surface_tolerance", top_surface_tolerance_);
-  GET("top_surface_min_pts", top_surface_min_pts_);
+  GET("top_surface_min_points", top_surface_min_points_);
   GET("empty_max_height", empty_max_height_);
   GET("one_earth_min", one_earth_min_); GET("one_earth_max", one_earth_max_);
   GET("two_earth_min", two_earth_min_); GET("two_earth_max", two_earth_max_);
@@ -312,7 +312,7 @@ LidarPerceptionNode::LidarPerceptionNode(const rclcpp::NodeOptions& options)
     "mustika_pillar: pos=[%.1f,%.1f] h=%.2f r=%.3f | "
     "core_pillar: pos=[%.1f,%.1f] h=%.2f r=%.3f",
     leaf_size_, roi_min_x_, roi_max_x_,
-    ransac_dist_thresh_, ransac_max_iters_,
+    ransac_distance_threshold_, ransac_max_iterations_,
     slice_thickness_, radius_min_, radius_max_,
     cluster_tolerance_, min_cluster_size_, max_cluster_size_,
     building_positions_.size(),
@@ -426,9 +426,37 @@ void LidarPerceptionNode::cloud_callback(
   timing.total_ms = ms_dur(t_end - t0).count();
 
   // ═══════════════════════════════════════════════════════════════════════
-  // 发布中间结果
+  // 发布中间结果 —— ⚠️ 2026-09-23 起**挂到 `debug_enabled` 下**
   // ═══════════════════════════════════════════════════════════════════════
-  publish_intermediate(filtered, gr, cylinders, obstacles, spots, msg->header);
+  // 原先**无条件每帧执行**，而它发的是**纯可视化**内容（2026-09-23 逐条核实）：
+  //
+  //   话题                                     代码订阅者  RViz 显示项
+  //   /perception/lidar/filtered                    0          0
+  //   /perception/lidar/ground                      0          1
+  //   /perception/lidar/non_ground                  0          1
+  //   /perception/lidar/l0_surface                  0          0   ← 孤儿
+  //   /perception/lidar/l1_surface                  0          0   ← 孤儿
+  //   /perception/lidar/l2_surface                  0          0   ← 孤儿
+  //   /perception/lidar/ground_plane                0          0   ← 孤儿
+  //   /perception/lidar/pillars  (MarkerArray)      0          1
+  //   /perception/lidar/obstacles(MarkerArray)      0          1
+  //   /perception/lidar/building_spots(MarkerArray) 0          1
+  //
+  // ⇒ **10 条话题、6 次整份点云 `pcl::toROSMsg` 拷贝**，每帧都做，而**代码里零订阅者**。
+  //    `LidarResult.msg` 的头注释早已定性："MarkerArray / debug_cloud 保留，
+  //    但从此**只作可视化**，不再承担数据职责" —— 数据走 `LidarResult`。
+  //    所以它们**全部属于"调试输出"**，比赛模式就该关（任务书 §1.7）。
+  //
+  // ⚠️ **代价（要知道，别当成 bug）**：`debug_enabled: false` 时 RViz 里
+  //    **柱子/障碍/建筑位/地面/非地面都看不到**（它们是这 10 条话题画的）。
+  //    台架要看就改 `config/debug_flags.yaml` 的 `debug_enabled: true` ——
+  //    ⚠️ **别去改回这里**：那等于把比赛模式的 CPU 又还回去了。
+  //
+  // ⚠️ 注意与上面"调试点云"的区别：`publish_debug_cloud`（`:463` 附近）发的是
+  //    **另一条** `debug_cloud`，它**本来就在这个开关下**。本条漏了，现在补齐。
+  if (debug_enabled_) {
+    publish_intermediate(filtered, gr, cylinders, obstacles, spots, msg->header);
+  }
 
   // ═══════════════════════════════════════════════════════════════════════
   // 构建 & 发布统一结果
@@ -552,8 +580,8 @@ LidarPerceptionNode::ground_segment_stage(const PointCloudPtr& input)
     seg.setOptimizeCoefficients(true);
     seg.setModelType(pcl::SACMODEL_PLANE);
     seg.setMethodType(pcl::SAC_RANSAC);
-    seg.setDistanceThreshold(ransac_dist_thresh_);
-    seg.setMaxIterations(ransac_max_iters_);
+    seg.setDistanceThreshold(ransac_distance_threshold_);
+    seg.setMaxIterations(ransac_max_iterations_);
     seg.setInputCloud(input);
 
     if (enable_normal_constraint_) {
@@ -899,7 +927,7 @@ pcl::PointIndices LidarPerceptionNode::refine_inliers_adaptive(
   if (norm < 1e-9) return refined;
 
   const auto& hmap = height_threshold_map_;
-  const double fallback = ransac_dist_thresh_;
+  const double fallback = ransac_distance_threshold_;
 
   for (size_t i = 0; i < cloud->size(); ++i) {
     const auto& pt = cloud->points[i];
@@ -1110,7 +1138,7 @@ std::tuple<bool, float, int> LidarPerceptionNode::detect_top_surface(
     if (pt.z >= z_lo) z_vals.push_back(pt.z);
 
   int cnt = static_cast<int>(z_vals.size());
-  if (cnt < top_surface_min_pts_) return {false, z_max, cnt};
+  if (cnt < top_surface_min_points_) return {false, z_max, cnt};
 
   float sum=0;
   for(float z:z_vals) sum+=z;
@@ -1700,8 +1728,8 @@ rcl_interfaces::msg::SetParametersResult LidarPerceptionNode::on_param_change(
       S("roi_min_x", roi_min_x_); S("roi_max_x", roi_max_x_);
       S("roi_min_y", roi_min_y_); S("roi_max_y", roi_max_y_);
       S("roi_min_z", roi_min_z_); S("roi_max_z", roi_max_z_);
-      S("ransac_dist_thresh", ransac_dist_thresh_);
-      SI("ransac_max_iters", ransac_max_iters_);
+      S("ransac_distance_threshold", ransac_distance_threshold_);
+      SI("ransac_max_iterations", ransac_max_iterations_);
       S("ransac_eps_angle", ransac_eps_angle_);
       SB("enable_normal_constraint", enable_normal_constraint_);
       S("normal_angle_threshold", normal_angle_threshold_);
@@ -1750,7 +1778,7 @@ rcl_interfaces::msg::SetParametersResult LidarPerceptionNode::on_param_change(
       S("column_z_min", column_z_min_); S("column_z_max", column_z_max_);
       SI("min_spot_points", min_spot_points_);
       S("top_surface_tolerance", top_surface_tolerance_);
-      SI("top_surface_min_pts", top_surface_min_pts_);
+      SI("top_surface_min_points", top_surface_min_points_);
       S("empty_max_height", empty_max_height_);
       S("one_earth_min", one_earth_min_); S("one_earth_max", one_earth_max_);
       S("two_earth_min", two_earth_min_); S("two_earth_max", two_earth_max_);

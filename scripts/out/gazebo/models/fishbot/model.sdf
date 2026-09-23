@@ -14,7 +14,7 @@
      - 驱动换了差速插件, 不再走 ros2_control (省掉 controller spawner)
 
   frame 约定 (fusion_params.yaml §static_tf):
-     base_link ← livox_frame / camera_front_frame / camera_rear_frame
+     base_link ← livox_frame / camera_wide_frame / camera_tele_frame
   这三段固定变换与此文件里的 <pose> 必须一致, 由 launch 的
   static_transform_publisher 广播 (Gazebo 不给固定关节发 TF)。
 -->
@@ -87,14 +87,14 @@
         <material><ambient>0.1 0.1 0.1 1</ambient><diffuse>0.1 0.1 0.1 1</diffuse></material>
       </visual>
 
-      <!-- 前后相机 + IMU 的外壳 (尺寸/位置对应下面各 <sensor> 的 <pose>) -->
-      <visual name="camera_front_visual">
+      <!-- 两路工业相机 + IMU 的外壳 (尺寸/位置对应下面各 <sensor> 的 <pose>) -->
+      <visual name="camera_wide_visual">
         <pose>0.1 0 0.1669 0 0 0</pose>
         <geometry><box><size>0.02 0.02 0.02</size></box></geometry>
         <material><ambient>0.1 0.25 0.7 1</ambient><diffuse>0.1 0.25 0.7 1</diffuse></material>
       </visual>
-      <visual name="camera_rear_visual">
-        <pose>-0.1 0 0.1669 0 0 0</pose>
+      <visual name="camera_tele_visual">
+        <pose>0.1 0 0.1669 0 0 0</pose>
         <geometry><box><size>0.02 0.02 0.02</size></box></geometry>
         <material><ambient>0.7 0.25 0.1 1</ambient><diffuse>0.7 0.25 0.1 1</diffuse></material>
       </visual>
@@ -163,8 +163,9 @@
         </plugin>
       </sensor>
 
-      <!-- ─── 前相机 → /camera_front/image_raw ─── -->
-      <sensor name="cam_front_s" type="camera">
+      <!-- ─── 宽角相机 → /camera_wide/image_raw ───
+           ⚠️ 2026-09-23 改名: 原名 `cam_front`(前相机)。改名的理由见下一条 -->
+      <sensor name="cam_wide_s" type="camera">
         <pose>0.1 0 0.1669 0 0 0</pose>
         <always_on>1</always_on>
         <update_rate>30</update_rate>
@@ -173,18 +174,18 @@
           <image><width>640</width><height>384</height><format>R8G8B8</format></image>
           <clip><near>0.05</near><far>30.0</far></clip>
         </camera>
-        <plugin name="gazebo_ros_camera_cam_front" filename="libgazebo_ros_camera.so">
+        <plugin name="gazebo_ros_camera_cam_wide" filename="libgazebo_ros_camera.so">
           <ros>
             <namespace>/</namespace>
-            <remapping>~/image_raw:=/camera_front/image_raw</remapping>
+            <remapping>~/image_raw:=/camera_wide/image_raw</remapping>
           </ros>
-          <camera_name>camera_front</camera_name>
-          <frame_name>camera_front_frame</frame_name>
+          <camera_name>camera_wide</camera_name>
+          <frame_name>camera_wide_frame</frame_name>
         </plugin>
       </sensor>
 
       <!-- ─── 深度相机 (任务书: Intel RealSense 435i, 近距深度) ───
-           挂在前相机下方。出三路: /camera_depth/image_raw (RGB),
+           挂在宽角相机下方。出三路: /camera_depth/image_raw (RGB),
            /camera_depth/depth/image_raw (32FC1), /camera_depth/points (PointCloud2)。
            ⚠ 话题名任务书没定 (全文没有 RealSense 话题约定), 这里按现有
              /camera_<角色>/... 的模式起名; 代码目前也还没有深度订阅者。 -->
@@ -204,23 +205,36 @@
         </plugin>
       </sensor>
 
-      <!-- ─── 后相机 (车尾, 绕 z 转 180°) → /camera_rear/image_raw ─── -->
-      <sensor name="cam_rear_s" type="camera">
-        <pose>-0.1 0 0.1669 0 0 3.1416</pose>
+      <!-- ─── 长焦相机 → /camera_tele/image_raw ───
+           ⚠️⚠️ 2026-09-23 **这是一次语义修正，不只是改名**。原名 `cam_rear`(后相机)，
+              当时建的是「车尾、绕 z 转 180°、hfov 1.1」—— 而实机是
+              **JR H200S 一宽一长焦、两路都朝前**（任务书 §0 传感器行）。
+              所以三处一起改（改名的理由：位置名会撒谎，光学名不会）：
+                · 名字   cam_rear → cam_tele        （+ topic / frame_name 同步）
+                · 朝向   yaw 3.1416 → 0             （**都朝 +x**）
+                · 视场   hfov 1.1 → 0.40            （**长焦**；1.1 与宽角一模一样是错的）
+              基准取自 `scripts/make_gazebo_world.py:180-181`（sensor_rig 那套已按
+              同一决定改过：cam_wide 1.10 / cam_tele 0.40，都朝 +x）。
+           ⚠️ **安装位置是占位**：实机两路相机的真实间距/高度（`camera_hardware.yaml`
+              的 `translation`）**尚未标定**，这里让两台仿真相机**共用同一个挂点** ——
+              刻意不编一个假的偏移，免得将来标定完还要回来同步两处假数据。
+              标定落地后，**本处 pose 与 launch 里的静态 TF 要一起改**。 -->
+      <sensor name="cam_tele_s" type="camera">
+        <pose>0.1 0 0.1669 0 0 0</pose>
         <always_on>1</always_on>
         <update_rate>30</update_rate>
         <camera>
-          <horizontal_fov>1.1</horizontal_fov>
+          <horizontal_fov>0.40</horizontal_fov>
           <image><width>640</width><height>384</height><format>R8G8B8</format></image>
           <clip><near>0.05</near><far>30.0</far></clip>
         </camera>
-        <plugin name="gazebo_ros_camera_cam_rear" filename="libgazebo_ros_camera.so">
+        <plugin name="gazebo_ros_camera_cam_tele" filename="libgazebo_ros_camera.so">
           <ros>
             <namespace>/</namespace>
-            <remapping>~/image_raw:=/camera_rear/image_raw</remapping>
+            <remapping>~/image_raw:=/camera_tele/image_raw</remapping>
           </ros>
-          <camera_name>camera_rear</camera_name>
-          <frame_name>camera_rear_frame</frame_name>
+          <camera_name>camera_tele</camera_name>
+          <frame_name>camera_tele_frame</frame_name>
         </plugin>
       </sensor>
     </link>

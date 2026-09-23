@@ -42,6 +42,14 @@ perception_pipeline:
     #    "通信断开 → 缓存补发"是 comm_node 的活（它持有串口），不在这里做。
     comm_diag_topic: "/communication/diagnostics"
 
+    # 融合层的穆斯蒂卡状态（`std_msgs/UInt8`，发布端 = `mustika_pillar_check`，模块 20）。
+    # ⚠️ **目前还没有发布者** —— 这一路恒不触发，`mustika_state` 仍是 0=未知。
+    #    补这条订阅是为了**把链接上**：在那之前，那个节点的结论**再对也到不了主控**
+    #    （它零消费者，与当初 `/perception/output` 零发布者是同一形态、方向相反）。
+    # ⚠️ 只认三档：0=未知 / 1=在柱上 / 5=掉落。**其余值丢弃并降级为 0** ——
+    #    上游超出自己定义域时，别把不认识的值透传给主控。
+    fusion_state_topic: "/perception/fusion/mustika_state"
+
     # 输出：**通信层唯一的上行入口**。comm_node 按 BEST_EFFORT 订阅它，
     # 而本节点按 RELIABLE 发布 —— RELIABLE 发布对两种订阅者都兼容，是安全侧。
     output_topic: "/perception/output"
