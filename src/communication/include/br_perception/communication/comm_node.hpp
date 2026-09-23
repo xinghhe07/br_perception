@@ -30,6 +30,7 @@
 #include <string>
 
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <rclcpp/rclcpp.hpp>
 
 #include "br_perception/communication/protocol_encoder.hpp"
@@ -66,6 +67,24 @@ private:
   /// ⚠ 本回调**不在串口线程**; 但仍别做重活 —— 会拖住诊断定时器等其它 ROS 回调。
   void on_perception(const br_perception::msg::PerceptionFrame::SharedPtr msg);
 
+  /// ROS executor 线程: 上游的紧急停止 → 编码成 `0x03` → 入发送队列。
+  ///
+  /// ── 为什么必须有这条（2026-09-22）──
+  ///   在此之前 `perception_pipeline` 发的紧急停止**只是一条 ROS 话题**，
+  ///   全仓库**零订阅者** ⇒ **STM32 什么也收不到**。更要命的是"感知算不出坐标"
+  ///   与"串口线断了"在主控侧**完全不可区分**，而这两件事的应对**正相反**
+  ///   （一个该等感知，一个该急停失能）。本回调把前者**落到线上**。
+  ///
+  /// ── 优先级：不需要动队列，靠"只取最新"天然抢到队首 ──
+  ///   `SerialManager::post_frame` 入队后 `notify_one` 立即唤醒发送线程，
+  ///   而发送线程取的是 `queue_.back()`（**最新那帧**）并把队列清空
+  ///   （`serial_manager.cpp:436-445`）。所以本帧入队后：
+  ///     · 立刻被发出，**不等感知帧的节奏**
+  ///     · 队列里没发完的感知帧被一并清掉 —— 这正是想要的：停车指令优先于场景状态
+  ///   ⚠️ 改 `SerialManager` 的取帧策略（例如改成 FIFO）会**破坏这个优先级**，
+  ///      届时必须给紧急帧单独开一条优先通路。
+  void on_emergency_stop(const std_msgs::msg::Bool::SharedPtr msg);
+
   /// **SerialManager 接收线程**: 解出一帧主控指令 → 发布。
   ///
   /// ⚠ 策略: **一律原样发布, 不解析、不丢弃**。
@@ -90,6 +109,11 @@ private:
   ///   出现"话题在、发布在、就是收不到"时, 第一个怀疑 QoS。
   std::string from_master_topic_{"/communication/from_master"};
   std::string diagnostics_topic_{"/communication/diagnostics"};
+
+  /// 上游紧急停止话题 (`std_msgs/Bool`) —— 见 `on_emergency_stop` 的说明。
+  /// ⚠️ 发布端是 `perception_pipeline`（config/perception_params.yaml 的同名键），
+  ///    **两边改名字要一起改**。
+  std::string emergency_stop_topic_{"/perception/emergency_stop"};
 
   /// 诊断发布周期 [s]。构造时夹到 ≥0.1 —— 0 或负值会让 wall timer 变成忙循环。
   double diagnostics_interval_sec_{1.0};
@@ -117,10 +141,24 @@ private:
   /// 让上层能发现"融合层输出了协议装不下的东西"。
   std::atomic<std::uint64_t> truncated_frames_{0};
 
+  /// 已上线的紧急停止帧数 —— **分两个计数器，不是一个**：
+  /// 现场最要紧的问题是"**到底发没发出去**"，而"发过 5 次"与"发的全是解除"
+  /// 在同一个计数里看不出来。分开之后：
+  ///   · `estop_frames_` 长期为 0 而上游在报紧急 → **本节点的订阅没接上**
+  ///   · 两个都涨 → 上游在反复进出紧急状态（**那种抖动本身就是故障**，见下）
+  std::atomic<std::uint64_t> estop_frames_{0};
+  std::atomic<std::uint64_t> estop_clear_frames_{0};
+
+  /// 进入紧急状态的次数 —— ⚠️ 它与 `estop_frames_` 分开是为了区分
+  /// "**一直停在紧急**"（次数 1、帧数随时间涨，正常重发）与
+  /// "**在紧急/正常之间来回跳**"（次数也涨 —— 那是上游判定抖动，要单独查）。
+  std::atomic<std::uint64_t> estop_entries_{0};
+
   /// 串口始终打不开 (含重连失败) 时为 true —— 诊断里的 device_unavailable 标志
   std::atomic<bool> device_unavailable_{false};
 
   rclcpp::Subscription<br_perception::msg::PerceptionFrame>::SharedPtr perception_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr emergency_sub_;
   rclcpp::Publisher<br_perception::msg::MasterCommand>::SharedPtr from_master_pub_;
   rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr diagnostics_pub_;
   rclcpp::TimerBase::SharedPtr diagnostics_timer_;

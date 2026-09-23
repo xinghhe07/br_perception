@@ -108,31 +108,34 @@ CameraPerceptionNode::CameraPerceptionNode(const rclcpp::NodeOptions& options)
   // ⚠️ QoS 的**兼容方向是单向的**，别记反：
   //    · RELIABLE 订阅 ← BEST_EFFORT 发布  = **不兼容**（静默收不到，不报错）
   //    · BEST_EFFORT 订阅 ← RELIABLE 发布  = 兼容（能收到）
-  //    所以订阅端取 BEST_EFFORT 是**安全侧**：上游是 SensorDataQoS 能收到，
-  //    哪天有人把上游改成 RELIABLE 也照样能收到。
-  //    六个发布端目前都是 rclcpp::SensorDataQoS()（mustika_detector.cpp:193 等 6 处）。
-  //    ⚠️ 反过来把**订阅端**改成 RELIABLE 才会踩雷 —— 那才是要确认真实上游的改动。
-  const auto sensor_qos = rclcpp::SensorDataQoS();
+  //    所以订阅端取 BEST_EFFORT 是**安全侧**；⚠️ 反过来改 RELIABLE 才会踩雷。
+  //
+  // ⚠️⚠️ **队列深度 = 1**（任务书 §3.0 硬约束第 2 条，2026-09-22 落地）：
+  //    原先这里是 `SensorDataQoS()`，depth 是 **5** —— 回调慢下来时攒 5 帧、
+  //    之后永远落后，且**卡顿过去也不恢复**。完整理由见
+  //    `image_preprocessor.cpp` 的 `stream_qos` 那段。
+  //    ⚠️ 六个检测器**发布端也已同时改成 depth=1**，两侧一起改才生效。
+  const auto stream_qos = rclcpp::QoS(1).best_effort();
 
   sub_mustika_wide_ = this->create_subscription<br_perception::msg::CameraMustika>(
-    mustika_topic_prefix_ + "_wide", sensor_qos,
+    mustika_topic_prefix_ + "_wide", stream_qos,
     std::bind(&CameraPerceptionNode::mustika_wide_callback, this, std::placeholders::_1));
   sub_mustika_tele_ = this->create_subscription<br_perception::msg::CameraMustika>(
-    mustika_topic_prefix_ + "_tele", sensor_qos,
+    mustika_topic_prefix_ + "_tele", stream_qos,
     std::bind(&CameraPerceptionNode::mustika_tele_callback, this, std::placeholders::_1));
 
   sub_pillar_wide_ = this->create_subscription<br_perception::msg::CameraPillar>(
-    pillar_topic_prefix_ + "_wide", sensor_qos,
+    pillar_topic_prefix_ + "_wide", stream_qos,
     std::bind(&CameraPerceptionNode::pillar_wide_callback, this, std::placeholders::_1));
   sub_pillar_tele_ = this->create_subscription<br_perception::msg::CameraPillar>(
-    pillar_topic_prefix_ + "_tele", sensor_qos,
+    pillar_topic_prefix_ + "_tele", stream_qos,
     std::bind(&CameraPerceptionNode::pillar_tele_callback, this, std::placeholders::_1));
 
   sub_spot_wide_ = this->create_subscription<br_perception::msg::CameraBuildingSpot>(
-    spot_topic_prefix_ + "_wide", sensor_qos,
+    spot_topic_prefix_ + "_wide", stream_qos,
     std::bind(&CameraPerceptionNode::spot_wide_callback, this, std::placeholders::_1));
   sub_spot_tele_ = this->create_subscription<br_perception::msg::CameraBuildingSpot>(
-    spot_topic_prefix_ + "_tele", sensor_qos,
+    spot_topic_prefix_ + "_tele", stream_qos,
     std::bind(&CameraPerceptionNode::spot_tele_callback, this, std::placeholders::_1));
 
   // ── 订阅：深度 ──
@@ -144,7 +147,7 @@ CameraPerceptionNode::CameraPerceptionNode(const rclcpp::NodeOptions& options)
 
   // ── 发布 ──
   pub_frame_ = this->create_publisher<br_perception::msg::CameraFrame>(
-    frame_topic_, sensor_qos);
+    frame_topic_, stream_qos);
   pub_diagnostics_ = this->create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
     diag_topic_, 10);
 

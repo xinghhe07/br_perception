@@ -104,26 +104,41 @@ ImagePreprocessor::ImagePreprocessor(const rclcpp::NodeOptions& options)
     std::bind(&ImagePreprocessor::on_parameter_change, this, std::placeholders::_1));
 
   // ── 订阅原始图像 ──
-  // ⚠ QoS 必须 BEST_EFFORT (SensorDataQoS): 相机驱动 (usb_cam / realsense2_camera /
-  //   Gazebo 相机插件) 一律按 sensor 数据发 BEST_EFFORT。RELIABLE 订阅者 ↔ BEST_EFFORT
-  //   发布者 = QoS 不兼容, 一帧都收不到, 且不报错 (静默无数据)。
+  // ⚠ QoS 必须 BEST_EFFORT: 相机驱动 (usb_cam / realsense2_camera / Gazebo 相机插件)
+  //   一律按 sensor 数据发 BEST_EFFORT。RELIABLE 订阅者 ↔ BEST_EFFORT 发布者
+  //   = QoS 不兼容, 一帧都收不到, 且不报错 (静默无数据)。
+  //
+  // ⚠️⚠️ **队列深度 = 1**（任务书 §3.0 三相机并行的**硬约束第 2 条**，
+  //    2026-09-22 落地）: "晚了就丢, 不堆积 —— 否则一次卡顿会让延迟**永久滚大**"。
+  //    原先是 `SensorDataQoS()`，它的 depth 是 **5**。差别是实打实的:
+  //      · depth=5 → 回调慢下来时队列攒 5 帧, 之后按序消费,
+  //        回调**永远落后约 5 帧的处理时间**, 而且**卡顿过去也不会自己恢复**;
+  //      · depth=1 → 只留最新, 旧帧直接丢, 延迟不累积。
+  //    对"实时看世界"的视觉链, 迟到的帧不只是没用, 是**有害**的。
+  //
+  // ⚠️ 本链**六条话题**（原始 ×2 / 预处理 ×2 / 检测结果 ×2 ×3 个检测器）**两侧都要 depth=1**:
+  //    发布端 depth 大照样会在发布侧攒帧, 只改订阅端等于没改。
+  //    全仓库的落点见 `grep -n "QoS(1).best_effort" src/camera/*.cpp`。
+  //    ⚠️ `camera_depth` 那一路**本来就是** depth=1（它是独立后加的），别改回去。
+  const auto stream_qos = rclcpp::QoS(1).best_effort();
+
   sub_wide_ = this->create_subscription<sensor_msgs::msg::Image>(
-    "/camera_wide/image_raw", rclcpp::SensorDataQoS(),
+    "/camera_wide/image_raw", stream_qos,
     std::bind(&ImagePreprocessor::wide_callback, this, std::placeholders::_1));
 
   sub_tele_ = this->create_subscription<sensor_msgs::msg::Image>(
-    "/camera_tele/image_raw", rclcpp::SensorDataQoS(),
+    "/camera_tele/image_raw", stream_qos,
     std::bind(&ImagePreprocessor::tele_callback, this, std::placeholders::_1));
 
-  // ── 发布预处理图像 (与下游检测器保持同为 BEST_EFFORT, 两侧必须一起改) ──
+  // ── 发布预处理图像 (与下游检测器保持同为 depth=1 + BEST_EFFORT, 两侧必须一起改) ──
   // ⚠️ 2026-09-20: 类型改为 PreprocessedImage —— 它把 letterbox 变换 (scale/pad/orig)
   //    一起带走, 检测器才能把 bbox 从「letterbox 坐标」反算回「原图坐标」。
   //    不反算的话, 所有 2D→3D 投影会整体偏移 (近处看不出、远处错得离谱)。
   pub_wide_ = this->create_publisher<br_perception::msg::PreprocessedImage>(
-    "/perception/camera_wide/preprocessed", rclcpp::SensorDataQoS());
+    "/perception/camera_wide/preprocessed", stream_qos);
 
   pub_tele_ = this->create_publisher<br_perception::msg::PreprocessedImage>(
-    "/perception/camera_tele/preprocessed", rclcpp::SensorDataQoS());
+    "/perception/camera_tele/preprocessed", stream_qos);
 
   // ── 诊断 ──
   pub_diagnostics_ = this->create_publisher<diagnostic_msgs::msg::DiagnosticArray>(

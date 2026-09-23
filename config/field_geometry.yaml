@@ -409,20 +409,42 @@
     building_spot_x: [2.80, 2.80, 8.20, 8.20, 5.5,  5.5,  4.25, 6.75, 6.75, 4.25]
     building_spot_y: [2.80, 8.20, 2.80, 8.20, 2.80, 8.20, 4.25, 4.25, 6.75, 6.75]
     building_spot_z: [0.6,  0.6,  0.6,  0.6,  0.6,  0.6,  0.9,  0.9,  0.9,  0.9]
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # ⚠️ legacy 回落值 —— **正式的平台高度一律用上面按位给的 `building_spot_z`**
+    # ═══════════════════════════════════════════════════════════════════════════
+    # 语义：`building_spot_z` **长度与建筑位数不符**时，整组被忽略，代码回落到本键
+    # （`building_spot_analyzer.cpp:90` 附近，`spot_platform_z(i)`）。
+    #
+    # 为什么留 0.6 而不是 0.0：
+    #   10 个位里前 6 个是 L1（真值 0.6）、后 4 个是 L2（真值 0.9）。
+    #   回落到 0.6 → **6 个位是对的、4 个错**；回落到 0.0 → **10 个全错**
+    #   （空位会被按"离平台面 0.6m"算高，算出 0.3 落进 one_earth 带宽被误报成"有 1 块"）。
+    #   **0.6 严格更优**，所以留它。
+    #
+    # ⚠️ 这是**过渡值**：代码完全迁移到 `building_spot_z` 之后**应当删掉本键**
+    #    （连回落路径一起删）。在那之前别改它。
     platform_z: 0.6
-    spot_half_size: 0.25
-    column_z_min: 0.0
-    column_z_max: 1.5
-    min_points_threshold: 5
-    top_surface_tolerance: 0.03
-    top_surface_min_points: 3
-    empty_max_height: 0.05
-    one_earth_min: 0.20
-    one_earth_max: 0.45
-    two_earth_min: 0.55
-    two_earth_max: 0.80
-    complete_tower_min: 0.80
-    complete_tower_max: 1.10
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # ⚠️ 判定阈值**不在这里**（2026-09-23 迁走）
+    # ═══════════════════════════════════════════════════════════════════════════
+    # 原先下面还挂着 12 条 `column_z_min/max`、`one_earth_min/max`、
+    # `two_earth_min/max`、`complete_tower_min/max`、`empty_max_height`、
+    # `min_points_threshold`、`top_surface_tolerance`、`top_surface_min_points`，
+    # 以及 `spot_half_size`。
+    #
+    # 它们**同时出现在 `lidar_params.yaml` 里**，而两份文件**都是 `/**` 通配**、
+    # 又都会被 launch 传给同一个节点 ⇒ **谁生效只取决于 launch 的 parameters 顺序**
+    # （`platform_z` 当时已经打架：0.6 vs 0.0）。删掉副本是唯一的根治。
+    #
+    # **判别原则（这条线要一直守住）**：
+    #   · **物理量在场地** —— `objects.earth_block`(0.35) / `objects.sky_block`(0.20) /
+    #     `complete_tower.height`(0.90) / `building_spots.spot_size`(0.5)
+    #     ⇒ 留在本文件（场地事实，随实测变）
+    #   · **判定带宽在算法** —— "多高算 1 个地球"、"几点算成片"这类
+    #     ⇒ 全部在 `config/lidar_params.yaml`（随"我们怎么判"变，不随场地变）
+    # ⚠️ 自动核对：`python3 scripts/check_param_consumers.py`（B1 节就是查这种重复）。
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 对称规则 (2026-09-09 用户确认): 红蓝全图左右对称于中轴 x=5.5,

@@ -104,6 +104,10 @@ CommNode::CommNode(const rclcpp::NodeOptions& options)
   output_topic_ = declare_parameter<std::string>("output_topic", output_topic_);
   from_master_topic_ = declare_parameter<std::string>("from_master_topic", from_master_topic_);
   diagnostics_topic_ = declare_parameter<std::string>("diagnostics_topic", diagnostics_topic_);
+  // ⚠️ 必须与 perception_pipeline 的 `emergency_stop_topic`（config/perception_params.yaml）
+  //    逐字一致 —— 对不上就是"上游在报紧急、线上一个 0x03 都没有"，且**不报任何错**。
+  emergency_stop_topic_ =
+      declare_parameter<std::string>("emergency_stop_topic", emergency_stop_topic_);
 
   // 夹取: 0 或负值会让 wall timer 变成忙循环
   diagnostics_interval_sec_ =
@@ -125,6 +129,15 @@ CommNode::CommNode(const rclcpp::NodeOptions& options)
   perception_sub_ = create_subscription<msg::PerceptionFrame>(
       output_topic_, rclcpp::SensorDataQoS(),
       std::bind(&CommNode::on_perception, this, std::placeholders::_1));
+
+  // 紧急停止：发布端是 perception_pipeline（`std_msgs/Bool`）。
+  // ⚠️ 用默认 QoS(RELIABLE, depth 10) —— 与发布端一致（那边也是 `rclcpp::QoS(10)`）。
+  //    这条**不能**图省事用 SensorDataQoS：安全信号丢一条就是少一次停车机会。
+  //    （方向也正好相反：这里若用 BEST_EFFORT 订 RELIABLE 发布**是兼容的**，
+  //      但那就放弃了重传，没有必要。）
+  emergency_sub_ = create_subscription<std_msgs::msg::Bool>(
+      emergency_stop_topic_, rclcpp::QoS(10),
+      std::bind(&CommNode::on_emergency_stop, this, std::placeholders::_1));
 
   // ── 把 SerialManager 的两个回调接上 ──
   serial_.set_frame_callback([this](const DecodedFrame& frame) { on_master_frame(frame); });
@@ -182,6 +195,32 @@ void CommNode::on_perception(const msg::PerceptionFrame::SharedPtr msg)
   }
 
   serial_.post_frame(std::move(result.bytes));
+}
+
+void CommNode::on_emergency_stop(const std_msgs::msg::Bool::SharedPtr msg)
+{
+  // ⚠️ **两个方向都发**：`false` 是"可以恢复行驶"。只发停车不发解除，
+  //    主控会永远停在那个状态（这正是 `encode_estop` 头注释里写的那条）。
+  const bool active = msg->data;
+
+  // ⚠️ 时间戳用 `now()`（ROS 时间，随 `use_sim_time` 走）——
+  //    与感知帧同源。编码器自己不取时钟，就是为了不让这里出现两个来源。
+  serial_.post_frame(encoder_.encode_estop(active, now()));
+
+  if (active) {
+    ++estop_frames_;
+    ++estop_entries_;
+  } else {
+    ++estop_clear_frames_;
+  }
+
+  // ⚠️ 这条**必须打日志**（与感知帧的截断计数刻意不同）：
+  //    紧急停止是**低频且要人立刻知道**的事件。现场日志里没有这一行，
+  //    就没法判断"到底发出去没有" —— 而那正是这个包存在的理由。
+  RCLCPP_WARN(get_logger(), "紧急停止%s → 已编码 0x03 入发送队列（累计 触发 %llu / 解除 %llu）",
+              active ? "**触发**" : "解除",
+              static_cast<unsigned long long>(estop_frames_.load()),
+              static_cast<unsigned long long>(estop_clear_frames_.load()));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -284,6 +323,19 @@ void CommNode::publish_diagnostics()
       kv("queued_frames", to_str(serial_.pending_frames())),
       // 通信层才知道协议上界, 所以由它上报"融合层给多了"
       kv("truncated_frames", to_str(truncated_frames_.load())),
+
+      // ── 紧急停止（0x03）──
+      // ⚠️ 这三项是**"停车指令到底发出去没有"的唯一观测窗口**。
+      //    判读方式（写在这里免得现场去翻代码）：
+      //      · estop_frames / estop_clear **都为 0**，而上游在报紧急
+      //          → 本节点的订阅**没接上**（话题名对不上 / 上游没发）
+      //      · estop_entries 一直涨
+      //          → 上游在**紧急/正常之间来回跳**，那是上游判定抖动，不是通信问题
+      //      · estop_frames 稳定增长 = 上游**一直停在紧急**，本节点在按
+      //        `emergency_repeat_sec` 重发（正常行为，防下游中途才连上）
+      kv("estop_frames",       to_str(estop_frames_.load())),
+      kv("estop_clear_frames", to_str(estop_clear_frames_.load())),
+      kv("estop_entries",      to_str(estop_entries_.load())),
   };
 
   diagnostic_msgs::msg::DiagnosticArray arr;

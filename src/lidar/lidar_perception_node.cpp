@@ -284,7 +284,14 @@ LidarPerceptionNode::LidarPerceptionNode(const rclcpp::NodeOptions& options)
                       "/perception/lidar/building_spots", 10);
 
   // ── 统一输出 ──
-  pub_result_      = this->create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
+  // ⚠️ 2026-09-22: 此前这里发的是 `DiagnosticArray`（给人看的计数文本），
+  //    而 `LidarResult.msg` 从 2026-09-18 建好起**一直零引用** —— 机器可读的
+  //    雷达接口实际上不存在。现改为发真正的数据接口（`LidarResult.msg` 头注释
+  //    写明它就是"替代拿 DiagnosticArray 当数据接口的做法"）。
+  //    原 DiagnosticArray 的内容一项没丢，全部搬到了 `/perception/lidar/diagnostics`。
+  //    ⚠️ QoS 保持 RELIABLE(10)：它是包内数据接口（容器内/同机），不是传感器原始流，
+  //       丢一帧雷达结果会让下游等下一次，比传感器图像严重。
+  pub_result_      = this->create_publisher<br_perception::msg::LidarResult>(
                       "/perception/lidar/result", 10);
   pub_diagnostics_ = this->create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
                       "/perception/lidar/diagnostics", 10);
@@ -446,7 +453,9 @@ void LidarPerceptionNode::cloud_callback(
   result.ground_plane[2] = static_cast<float>(gr.coeff.values[2]);
   result.ground_plane[3] = static_cast<float>(gr.coeff.values[3]);
 
-  publish_unified_result(result);
+  // ⚠️ frame_id 取自**输入点云的 header**（`msg` 是本回调的入参点云）。
+  //    本节点没有坐标变换，输出坐标系 = 输入坐标系，继承是最诚实的做法。
+  publish_unified_result(result, msg->header.frame_id);
 
   // ═══════════════════════════════════════════════════════════════════════
   // 调试点云
@@ -1243,91 +1252,232 @@ void LidarPerceptionNode::publish_intermediate(
 // ═══════════════════════════════════════════════════════════════════════════
 // 发布: 统一感知结果 (/perception/lidar/result)
 // ═══════════════════════════════════════════════════════════════════════════
-void LidarPerceptionNode::publish_unified_result(
-    const LidarPerceptionResult& result)
+// ── 对外消息里各类枚举的**取值**（照 msg/*.msg 的注释，**不照内部枚举**）──
+//   单独列出而不是就地写魔数：这里每一条都与内部枚举**编号不同**，散在代码里必看错。
+namespace {
+// Obstacle.msg 的 type
+constexpr uint8_t kMsgObsUnknown     = 0;   // UNKNOWN
+constexpr uint8_t kMsgObsEnemyRobot  = 1;   // ENEMY_ROBOT
+constexpr uint8_t kMsgObsDroppedBlock= 2;   // DROPPED_BLOCK
+constexpr uint8_t kMsgObsOther       = 3;   // OTHER
+// Obstacle.msg / BuildingSpot.msg 的 source
+constexpr uint8_t kMsgSourceLidar    = 0;   // LIDAR
+// BuildingSpot.msg 的 state
+constexpr uint8_t kMsgSpotEmpty      = 0;
+constexpr uint8_t kMsgSpotOneEarth   = 1;
+constexpr uint8_t kMsgSpotTwoEarth   = 2;
+constexpr uint8_t kMsgSpotFullTower  = 3;
+// BuildingSpot.msg 的 top_color
+constexpr uint8_t kMsgTopColorNone    = 0;
+constexpr uint8_t kMsgTopColorUnknown = 3;
+// BuildingSpot.msg 的 ownership
+constexpr uint8_t kMsgOwnerNone      = 0;
+// PillarStatus.msg 的 type
+constexpr uint8_t kMsgPillarMustika  = 0;
+constexpr uint8_t kMsgPillarCore     = 1;
+
+// ══════════════════════════════════════════════════════════════════════════
+// 内部枚举 → 对外消息枚举 的**显式映射**
+//
+// ⚠️⚠️ 为什么必须显式写、**绝不能 `static_cast`**（2026-09-22 接线时发现）：
+//     两套枚举的编号根本不一致，直接转会让分类**整体错位**，
+//     而且这是**编译期完全查不出**的静默错误 —— 现场表现是"感知报了但全错"。
+//
+//   内部 `ObstacleType`     值   `Obstacle.msg` 的 type
+//   ─────────────────────── ───  ─────────────────────
+//   UNKNOWN                  0   0 = UNKNOWN
+//   EARTH_CUBE               1   1 = ENEMY_ROBOT     ← 地球方块会**被当成敌方机器人**
+//   SKY_CUBE                 2   2 = DROPPED_BLOCK
+//   ENEMY_ROBOT              3   3 = OTHER           ← 敌方机器人会**被当成"其他"**
+//   MUSTIKA                  4   （越界，无对应值）
+//
+//   内部 `CylinderDetection::Type` 值  `PillarStatus.msg` 的 type
+//   ────────────────────────────── ───  ──────────────────────
+//   UNKNOWN                        0   （无对应值）
+//   MUSTIKA_PILLAR                 1   0 = MUSTIKA_PILLAR    ← **差 1**
+//   CORE_PILLAR                    2   1 = CORE_PILLAR       ← **差 1**
+//
+//   内部 `BuildingSpotStatus` 与 `BuildingSpot.msg.state` **恰好同序**（0..3），
+//   但仍走显式 switch —— 将来任一边加值，这里会**漏掉分支被编译器抓到**，
+//   而不是继续静默错位。
+//
+//   ⚠️ 三个映射里**只有建筑位那个是安全的巧合**，另外两个是**真错位**。
+//      要改这些映射，先回去读上面对应那张表，别看枚举名想当然。
+// ══════════════════════════════════════════════════════════════════════════
+uint8_t to_msg_obstacle_type(ObstacleType t)
 {
-  diagnostic_msgs::msg::DiagnosticArray arr;
-  arr.header.stamp = result.stamp;
-
-  diagnostic_msgs::msg::DiagnosticStatus st;
-  st.name   = "lidar_perception";
-  st.hardware_id = "mid360";
-
-  // 健康判定
-  if (!result.radar_connected) {
-    st.level   = diagnostic_msgs::msg::DiagnosticStatus::ERROR;
-    st.message = "RADAR DISCONNECTED";
-  } else if (!result.ground_found) {
-    st.level   = diagnostic_msgs::msg::DiagnosticStatus::WARN;
-    st.message = "NO GROUND";
-  } else if (result.timing.total_ms < 60.0) {
-    st.level   = diagnostic_msgs::msg::DiagnosticStatus::OK;
-    st.message = "OK";
-  } else if (result.timing.total_ms < 100.0) {
-    st.level   = diagnostic_msgs::msg::DiagnosticStatus::WARN;
-    st.message = "SLOW";
-  } else {
-    st.level   = diagnostic_msgs::msg::DiagnosticStatus::ERROR;
-    st.message = "VERY SLOW";
+  switch (t) {
+    case ObstacleType::UNKNOWN:     return kMsgObsUnknown;
+    case ObstacleType::ENEMY_ROBOT: return kMsgObsEnemyRobot;
+    // 地球方块与天空方块都是"掉落在地面的方块" —— 协议里就是这么归类的。
+    // ⚠️ 代价：**地球/天空之分在 Obstacle.type 里丢失**。若下游需要区分
+    //    （计分要用），得扩 Obstacle.msg 的枚举 + 协议 —— 与"协议冻结"一起谈，
+    //    别在这里就地编一个值。
+    case ObstacleType::EARTH_CUBE:
+    case ObstacleType::SKY_CUBE:    return kMsgObsDroppedBlock;
+    // 穆斯蒂卡不是方块，协议里没有它的位置 → OTHER。
+    // 它"在不在柱上"由 `PillarStatus.has_object_on_top` 表达，那才是正路。
+    case ObstacleType::MUSTIKA:     return kMsgObsOther;
   }
+  return kMsgObsUnknown;   // 将来新增枚举值时的兜底：宁可报未知，不可错位
+}
 
-  auto add = [&](const std::string& k, double v) {
-    diagnostic_msgs::msg::KeyValue kv;
-    kv.key = k; kv.value = std::to_string(v);
-    st.values.push_back(kv);
-  };
-
-  // 平面系数
-  if (result.ground_plane.size() >= 4) {
-    add("ground_a", result.ground_plane[0]);
-    add("ground_b", result.ground_plane[1]);
-    add("ground_c", result.ground_plane[2]);
-    add("ground_d", result.ground_plane[3]);
+uint8_t to_msg_spot_state(BuildingSpotStatus s)
+{
+  switch (s) {
+    case BuildingSpotStatus::EMPTY:          return kMsgSpotEmpty;
+    case BuildingSpotStatus::ONE_EARTH:      return kMsgSpotOneEarth;
+    case BuildingSpotStatus::TWO_EARTH:      return kMsgSpotTwoEarth;
+    case BuildingSpotStatus::COMPLETE_TOWER: return kMsgSpotFullTower;
   }
+  return kMsgSpotEmpty;
+}
 
-  // 检测计数
-  add("cylinder_count",     static_cast<double>(result.cylinders.size()));
-  add("obstacle_count",     static_cast<double>(result.obstacles.size()));
-  add("building_spot_count", static_cast<double>(result.building_spots.size()));
-
-  int empty_c=0, one_c=0, two_c=0, tower_c=0;
-  for (const auto& s : result.building_spots) {
-    switch(s.status){
-      case BuildingSpotStatus::EMPTY:empty_c++;break;
-      case BuildingSpotStatus::ONE_EARTH:one_c++;break;
-      case BuildingSpotStatus::TWO_EARTH:two_c++;break;
-      case BuildingSpotStatus::COMPLETE_TOWER:tower_c++;break;
+/// @brief 从圆柱列表里挑"最像目标柱"的那一个；挑不出返回 nullptr
+///
+/// ⚠️ 判据要求 `matches_expected`（高度落在该柱的量程内**且**半径在预期值 ±30% 内，见
+///    `detect_cylinders` 的 707-737 行）。**不满足就返回 nullptr，不退而求其次**：
+///    场上还有别的圆柱（例如两块叠起来的塔正好落在柱高量程内），挑错比不报更糟 ——
+///    下游会拿一个错误位置的"柱子"去做规划。
+///
+/// ⚠️ 返回的是**指向 `result.cylinders` 元素的裸指针**，只在本次发布内有效，不要存。
+const CylinderDetection* pick_pillar(const std::vector<CylinderDetection>& cyls,
+                                     CylinderDetection::Type want)
+{
+  const CylinderDetection* best = nullptr;
+  for (const auto& c : cyls) {
+    if (c.type != want || !c.matches_expected) continue;
+    if (best == nullptr ||
+        c.position_error < best->position_error ||
+        (c.position_error == best->position_error && c.confidence > best->confidence)) {
+      best = &c;
     }
   }
-  add("spots_empty",    static_cast<double>(empty_c));
-  add("spots_one_earth", static_cast<double>(one_c));
-  add("spots_two_earth", static_cast<double>(two_c));
-  add("spots_tower",    static_cast<double>(tower_c));
+  return best;
+}
 
-  int earth=0, sky=0, enemy=0, mustika=0, unknown=0;
+/// @brief 内部圆柱 → `PillarStatus`；`c == nullptr` 表示**这根柱子没检出**
+///
+/// ⚠️ 没检出时返回**全零**（position 0,0,0 / height 0 / diameter 0 / 无顶物）——
+///    这是本节点与下游约定的"未检出"哨兵。**`PillarStatus.msg` 没有 `detected` 字段**，
+///    所以"没检出"和"检出了一个 height=0 的柱子"在消息层面**长得一样**；
+///    下游请按 `height == 0 && diameter == 0` 判定未检出。
+///    ⚠️ 这是**接口的缺陷不是本节点的**：真要干净，该给 `PillarStatus.msg` 加
+///       `bool detected`（加法改动，不影响线上协议 —— encoder 只写 occupied 位）。
+///       已记入 doc/待编译验证清单，等用户定。
+br_perception::msg::PillarStatus to_msg_pillar(const CylinderDetection* c)
+{
+  br_perception::msg::PillarStatus out;   // 默认构造即全零 = "未检出"
+  if (c == nullptr) return out;
+
+  out.type = (c->type == CylinderDetection::MUSTIKA_PILLAR) ? kMsgPillarMustika
+                                                            : kMsgPillarCore;
+  // 位置 = **地面投影点**（msg 的约定）。bottom_z 就是柱脚高度，不是 0 ——
+  // 柱子立在 L1/L2 上时 bottom_z 会明显大于 0，别丢掉它。
+  out.position.x = c->center_x;
+  out.position.y = c->center_y;
+  out.position.z = c->bottom_z;
+  out.height   = c->height;
+  out.diameter = c->radius * 2.0f;   // ⚠️ 内部存的是**半径**，消息要的是**直径**
+  out.has_object_on_top = c->has_top_object;
+  out.confidence = c->confidence;
+  return out;
+}
+}  // namespace
+
+void LidarPerceptionNode::publish_unified_result(
+    const LidarPerceptionResult& result,
+    const std::string& frame_id)
+{
+  br_perception::msg::LidarResult out;
+  out.header.stamp = result.stamp;
+
+  // ⚠️ frame_id **原样继承输入点云的**，不写死 "world"。
+  //    本节点**没有任何坐标变换** —— 进来的点云是什么系, 出去的结果就是什么系。
+  //    2026-09-22 核实: 全文件搜不到 transform / world 相关代码。
+  //    硬写 "world" 就是**虚构一个本节点并没有产出的坐标系**,
+  //    下游照它做 TF 变换会失败或算错, 且**错得没有提示**
+  //    （同 `msg/CameraFrame.msg` 里对 frame_id 留空的那段理由）。
+  //    转世界系是融合层的活（它有 TF、有外参、有里程计）。
+  out.header.frame_id = frame_id;
+
+  // ── 检测结果 ──
+  out.obstacles.reserve(result.obstacles.size());
   for (const auto& o : result.obstacles) {
-    switch(o.type){
-      case ObstacleType::EARTH_CUBE:earth++;break;
-      case ObstacleType::SKY_CUBE:sky++;break;
-      case ObstacleType::ENEMY_ROBOT:enemy++;break;
-      case ObstacleType::MUSTIKA:mustika++;break;
-      default:unknown++;break;
-    }
+    br_perception::msg::Obstacle m;
+    m.id = static_cast<uint32_t>(std::max(0, o.id));
+    m.position.x = o.centroid_x;
+    m.position.y = o.centroid_y;
+    m.position.z = o.centroid_z;
+    m.bbox_size.x = o.length;
+    m.bbox_size.y = o.width;
+    m.bbox_size.z = o.height;
+    // ⚠️ 速度**恒为 0**, 这是如实报告: 雷达层只出单帧几何, 不做运动估计。
+    //    速度是 `kalman_tracker`（模块 18）的活 —— 它拿到连续帧后给。
+    //    这里填 0 的意思是"本节点不提供速度", 不是"该物体静止"。
+    m.velocity.x = 0.0; m.velocity.y = 0.0; m.velocity.z = 0.0;
+    m.type = to_msg_obstacle_type(o.type);
+    m.confidence = o.confidence;
+    m.source = kMsgSourceLidar;
+    out.obstacles.push_back(m);
   }
-  add("obs_earth",  static_cast<double>(earth));
-  add("obs_sky",    static_cast<double>(sky));
-  add("obs_enemy",  static_cast<double>(enemy));
-  add("obs_mustika",static_cast<double>(mustika));
-  add("obs_unknown",static_cast<double>(unknown));
 
-  add("l0_points", static_cast<double>(result.l0_points));
-  add("l1_points", static_cast<double>(result.l1_points));
-  add("l2_points", static_cast<double>(result.l2_points));
-  add("ground_found", result.ground_found ? 1.0 : 0.0);
-  add("radar_connected", result.radar_connected ? 1.0 : 0.0);
+  out.building_spots.reserve(result.building_spots.size());
+  for (const auto& s : result.building_spots) {
+    br_perception::msg::BuildingSpot m;
+    m.spot_id = static_cast<uint32_t>(std::max(0, s.id));
+    m.position.x = s.spot_x;
+    m.position.y = s.spot_y;
+    m.position.z = s.platform_z;
+    m.state = to_msg_spot_state(s.status);
+    // ⚠️⚠️ **雷达判不了塔顶颜色** —— 这是本层的硬事实, 不是没做:
+    //    `building_spot_analyzer.cpp:296` 原文"完整塔: 雷达无法判断天空方块朝上颜色
+    //    → 标记需要视觉辅助"。
+    //    所以这里填 **UNKNOWN(3)**, 而**不是 NONE(0)**:
+    //      NONE 的意思是"没有塔顶", 而这里明明有塔 —— 填 NONE 就是**撒谎**,
+    //      下游会以为那个建筑位是空的。
+    //    顶面颜色归 `sky_block_detector`（模块 9, 视觉）, 融合时覆盖这个值。
+    m.top_color = kMsgTopColorUnknown;
+    // 雷达没有"归属"概念（那是按队伍立场推断的, 需要融合层知道红蓝方与自机颜色）
+    m.ownership = kMsgOwnerNone;
+    m.source = kMsgSourceLidar;
+    // ⚠️ 雷达层**不计算逐建筑位置信度**（没有那个算法）。这里给的是**由可观测证据
+    //    导出的粗值**, 语义只有三档, **别当连续量用**:
+    //      · 有点云且有顶面证据 → 1.0（"确实在那儿"）
+    //      · 有点云但没形成顶面  → 0.6（"有回波, 但不像塔/方块"）
+    //      · 完全没点            → 0.0（"**没观测**", 不是"看见了但不可信"）
+    //    ⚠️ 第三档与"置信度为 0"字面相同 —— 要区分得看 `point_count`,
+    //       故本节点把 point_count 放进了诊断话题。
+    //       融合层若要更精细的置信度, 那是 building_spot_analyzer 要补的算法。
+    if (s.has_top_surface)      m.confidence = 1.0f;
+    else if (s.point_count > 0) m.confidence = 0.6f;
+    else                        m.confidence = 0.0f;
+    out.building_spots.push_back(m);
+  }
 
-  arr.status.push_back(st);
-  pub_result_->publish(arr);
+  // ── 两根柱子（一根都没有时是全零哨兵，见 to_msg_pillar）──
+  out.mustika_pillar = to_msg_pillar(
+      pick_pillar(result.cylinders, CylinderDetection::MUSTIKA_PILLAR));
+  out.core_pillar = to_msg_pillar(
+      pick_pillar(result.cylinders, CylinderDetection::CORE_PILLAR));
+
+  // ── 各阶段耗时 ──
+  // ⚠️ 下标顺序与 `StageProfiler::declare` 的顺序对应（msg/LidarResult.msg 的约定）。
+  //    本节点用的是 `PipelineTiming` 结构体而不是 StageProfiler, 故这里**显式按
+  //    管线阶段顺序**填, 顺序写在下面这段注释里, 改管线顺序时**两边一起改**:
+  //      [0] 预处理  [1] 地面分割  [2] 圆柱检测  [3] 障碍聚类  [4] 建筑位分析
+  out.stage_elapsed_ms = {
+      static_cast<float>(result.timing.preprocess_ms),
+      static_cast<float>(result.timing.ground_segment_ms),
+      static_cast<float>(result.timing.cylinder_detect_ms),
+      static_cast<float>(result.timing.cluster_extract_ms),
+      static_cast<float>(result.timing.building_spot_ms)};
+
+  // watchdog_ok = "雷达流水线是否在线"。注意**只看雷达连没连**，不看这一帧处理得好不好
+  // （地面没找到 / 处理慢 是另外的诊断项，混进来会让下游分不清"断流"与"这帧质量差"）。
+  out.watchdog_ok = result.radar_connected;
+
+  pub_result_->publish(out);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1435,6 +1585,72 @@ void LidarPerceptionNode::publish_diagnostics(
   add("input_points",      static_cast<double>(timing.input_points));
   add("ground_points",     static_cast<double>(timing.ground_points));
   add("non_ground_points", static_cast<double>(timing.non_ground_points));
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 以下这些**原先塞在 `/perception/lidar/result` 里**（那时那边发的是
+  // `DiagnosticArray`）。2026-09-22 那条话题改成发真正的数据接口 `LidarResult`
+  // 之后，这些**给人看的**内容搬到这里 —— **一项都没丢，只是换了话题**。
+  // 它们本来就属于诊断：下游要的是 `LidarResult` 里的结构化字段，不是这些计数文本。
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // ── 健康与质量 ──
+  // ⚠️ 这三项与 `LidarResult.watchdog_ok`（只表示雷达连没连）**不是一回事**：
+  //    这里说的是一帧算得好不好（地面找没找到、处理快不快）。分开表达，
+  //    下游才能分清"断流了"和"这帧质量差"。
+  add("ground_found",    result.ground_found ? 1.0 : 0.0);
+  add("radar_connected", result.radar_connected ? 1.0 : 0.0);
+
+  // ── 地面平面系数（归一化 a,b,c,d）──
+  if (result.ground_plane.size() >= 4) {
+    add("ground_a", result.ground_plane[0]);
+    add("ground_b", result.ground_plane[1]);
+    add("ground_c", result.ground_plane[2]);
+    add("ground_d", result.ground_plane[3]);
+  }
+
+  // ── 检测计数 ──
+  add("cylinder_count",      static_cast<double>(result.cylinders.size()));
+  add("obstacle_count",      static_cast<double>(result.obstacles.size()));
+  add("building_spot_count", static_cast<double>(result.building_spots.size()));
+
+  int empty_c = 0, one_c = 0, two_c = 0, tower_c = 0;
+  for (const auto& s : result.building_spots) {
+    switch (s.status) {
+      case BuildingSpotStatus::EMPTY:          empty_c++; break;
+      case BuildingSpotStatus::ONE_EARTH:      one_c++;   break;
+      case BuildingSpotStatus::TWO_EARTH:      two_c++;   break;
+      case BuildingSpotStatus::COMPLETE_TOWER: tower_c++; break;
+    }
+  }
+  add("spots_empty",     static_cast<double>(empty_c));
+  add("spots_one_earth", static_cast<double>(one_c));
+  add("spots_two_earth", static_cast<double>(two_c));
+  add("spots_tower",     static_cast<double>(tower_c));
+
+  // ⚠️ 这两个计数是**内部**分类（地球/天空方块分得开），而发出去的
+  //    `Obstacle.type` 把两者都归成 DROPPED_BLOCK（协议里没有更细的档）。
+  //    所以**这里是对外接口的信息损失的一个观测窗口**：现场若发现"两种方块分不开了"，
+  //    看这两个计数还是分开的，说明是**消息/协议的表达力不够**，不是检测器坏了。
+  int earth = 0, sky = 0, enemy = 0, mustika = 0, unknown = 0;
+  for (const auto& o : result.obstacles) {
+    switch (o.type) {
+      case ObstacleType::EARTH_CUBE:  earth++;   break;
+      case ObstacleType::SKY_CUBE:    sky++;     break;
+      case ObstacleType::ENEMY_ROBOT: enemy++;   break;
+      case ObstacleType::MUSTIKA:     mustika++; break;
+      case ObstacleType::UNKNOWN:     unknown++; break;
+    }
+  }
+  add("obs_earth",   static_cast<double>(earth));
+  add("obs_sky",     static_cast<double>(sky));
+  add("obs_enemy",   static_cast<double>(enemy));
+  add("obs_mustika", static_cast<double>(mustika));
+  add("obs_unknown", static_cast<double>(unknown));
+
+  // ── 分层地面点云规模 ──
+  add("l0_points", static_cast<double>(result.l0_points));
+  add("l1_points", static_cast<double>(result.l1_points));
+  add("l2_points", static_cast<double>(result.l2_points));
 
   arr.status.push_back(st);
   pub_diagnostics_->publish(arr);

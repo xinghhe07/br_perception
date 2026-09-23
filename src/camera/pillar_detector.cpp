@@ -134,17 +134,22 @@ PillarDetector::PillarDetector(const rclcpp::NodeOptions& options)
   param_callback_handle_ = this->add_on_set_parameters_callback(
     std::bind(&PillarDetector::on_parameter_change, this, std::placeholders::_1));
 
+  // ⚠ BEST_EFFORT + **队列深度 1**（任务书 §3.0 硬约束第 2 条）——
+  //    完整理由写在 `image_preprocessor.cpp` 的 `stream_qos` 那一段。
+  //    **上游发布端与本处必须同为 depth=1**, 只改一侧等于没改。
+  const auto stream_qos = rclcpp::QoS(1).best_effort();
+
   sub_wide_ = this->create_subscription<br_perception::msg::PreprocessedImage>(
-    "/perception/camera_wide/preprocessed", rclcpp::SensorDataQoS(),
+    "/perception/camera_wide/preprocessed", stream_qos,
     std::bind(&PillarDetector::wide_callback, this, std::placeholders::_1));
   sub_tele_ = this->create_subscription<br_perception::msg::PreprocessedImage>(
-    "/perception/camera_tele/preprocessed", rclcpp::SensorDataQoS(),
+    "/perception/camera_tele/preprocessed", stream_qos,
     std::bind(&PillarDetector::tele_callback, this, std::placeholders::_1));
 
   pub_wide_ = this->create_publisher<br_perception::msg::CameraPillar>(
-    "/perception/camera/pillars_wide", rclcpp::SensorDataQoS());
+    "/perception/camera/pillars_wide", stream_qos);
   pub_tele_ = this->create_publisher<br_perception::msg::CameraPillar>(
-    "/perception/camera/pillars_tele", rclcpp::SensorDataQoS());
+    "/perception/camera/pillars_tele", stream_qos);
 
   pub_diagnostics_ = this->create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
     "/perception/camera/pillar_diagnostics", 10);

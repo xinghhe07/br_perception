@@ -63,8 +63,33 @@ constexpr std::size_t kCrcBytes = 2;
 enum class PacketType : std::uint8_t {
   PERCEPTION = 0x01,   ///< 感知帧
   HEARTBEAT  = 0x02,   ///< 心跳 (空 payload)
-  ERROR      = 0x03,   ///< 错误上报 (未实现)
+  /// @brief 紧急停止 / 失效上报。
+  ///
+  /// ⚠️ 2026-09-22: 原为 `ERROR = 0x03`，**一直是"未实现"**，而全仓库零引用
+  ///    （只在本枚举里出现过），故直接收窄语义并实现 —— 不是新增一个包。
+  ///
+  /// ⚠️ 它解决的**具体问题**（务必别退化）：只发 ROS 话题的紧急停止，
+  ///    **STM32 什么也收不到** —— `comm_node` 只订阅 `/perception/output` 一个话题。
+  ///    更要命的是"感知算不出坐标"与"串口线断了"在主控侧**完全不可区分**，
+  ///    而这两件事的应对**正相反**（一个该等感知，一个该急停失能）。
+  ///    有了本包，主控能分清：
+  ///      · 收到 `0x03 estop=1` → **链路活着，是感知侧要求停车**
+  ///      · 什么都没收到         → **链路死了**
+  ESTOP      = 0x03,
   DEBUG      = 0x7F,   ///< 调试字符串 (未实现)
+};
+
+/// @brief `0x03` ESTOP 包的 payload 取值
+///
+/// ⚠️ payload 刻意只有 **5 字节**（`uint32 timestamp_ms` + `uint8 estop`）：
+///    每多一个字节就多一条与下位机的契约，而我们**没有**下位机可确认。
+///    ⚠️ 特别是**故意不带"原因码"** —— 区分"算不出坐标"与"传感器全失"
+///       靠的是"收到 0x03"对比"什么都没收到"（见 `PacketType::ESTOP` 的注释），
+///       已经够用。细分原因留在 ROS 侧的 `/system/degradation_state` 给人看。
+///       将来主控若确实需要原因码，那是**加字段 + 定编码**，要与下位机一起定。
+enum EstopValue : std::uint8_t {
+  kEstopClear  = 0,   ///< 解除：可以恢复行驶
+  kEstopActive = 1,   ///< **要求停车**
 };
 
 /// @brief 协议参数。**协议冻结后, 改动只会发生在这里。**
@@ -76,6 +101,32 @@ enum class PacketType : std::uint8_t {
 ///     MODBUS      {0x8005, 0xFFFF, true,  true,  0x0000} → 0x4B37
 ///     KERMIT      {0x1021, 0x0000, true,  true,  0x0000} → 0x2189
 ///   后两条走反射分支 —— **只测前两条会漏掉整条反射路径** (曾经真的漏过)。
+/// @brief `0x01` 感知帧里**状态标志字节**的位定义
+///
+/// ⚠️ 2026-09-22: 这个字节**原先叫 `odometry_reliable`，是个 0/1 的 uint8**
+///    —— 7 位白扔。现在当标志位用，**长度一个字节都没变** ⇒ 帧大小、CRC 覆盖、
+///    所有"固定段 16 字节"的算式**全都不用改**。
+///
+/// ⚠️⚠️ **这是对下位机的破坏性改动**：原来读 bit0 当"里程计可靠"的实现仍然正确
+///    （bit0 语义没动），但"整字节 0/1"的假设不再成立 —— 收到 0x05 时按 0/1 解读
+///    会判成"真"，实际 pose_valid=1 而 odometry_reliable=0。
+///    **必须与下位机确认后启用**（并入 `config/comm_params.yaml` 头部那份未冻结清单）。
+///
+/// 为什么需要这几个位（各自的来龙去脉见 `doc/模块进度.md`）：
+///   · `kFlagPoseValid` —— 让"**位置不可用，但状态照发**"成为**合法状态**。
+///     没有它，感知算不出 world 坐标时只能**整帧不发** ⇒ 主控连比赛计时都断了。
+///   · `kFlagSanctuaryValid` / `kFlagHeldCountValid` —— 见下方 `0` 值的说明。
+enum StatusFlag : std::uint8_t {
+  kFlagOdometryReliable = 1u << 0,   ///< 里程计可靠（**原 `odometry_reliable` 的 0/1**）
+  /// 位置类字段（self_pose_*、建筑位/障碍物坐标、mustika_pose）**有效**
+  kFlagPoseValid        = 1u << 1,
+  /// `sanctuary_mandate_fulfilled` 字段有效。**0 = 该字段无意义，主控必须忽略它**
+  kFlagSanctuaryValid   = 1u << 2,
+  /// `held_object_count` 字段有效。**0 = 该字段无意义，主控必须忽略它**
+  kFlagHeldCountValid   = 1u << 3,
+  // bit4..bit7 **保留**，发送端必须置 0；接收端必须忽略。
+};
+
 struct ProtocolConfig {
   // ── CRC16 (⚠ 待与下位机确认; 默认 CRC-16/CCITT-FALSE) ──
   std::uint16_t crc16_polynomial{0x1021};
@@ -95,6 +146,10 @@ struct ProtocolConfig {
   static constexpr std::size_t kFixedPayloadBytes = 16 + 8 + 2;
   static constexpr std::size_t kBytesPerSpot = 4;       ///< spot_id/state/top_color/ownership
   static constexpr std::size_t kBytesPerObstacle = 18;  ///< 见 .cpp 的逐字段写入
+
+  /// `0x03` ESTOP 包的 payload 长度: `uint32 timestamp_ms` + `uint8 estop`
+  /// ⚠️ 与 `0x01` 无关（不是 kFixedPayloadBytes 的一部分），单独给常量
+  static constexpr std::size_t kEstopPayloadBytes = 4 + 1;
 
   /// payload 上界 [字节] —— **由本 config 的实际上限算出**。
   /// ⚠ 原先写成常量 `16 + 8 + 2 + (1+4*16) + (1+18*10)`，那两个 16/10 是**独立硬编码**:
@@ -147,11 +202,35 @@ public:
   /// 可并发调用。每次调用消耗一个帧序号 (0..255 循环)。
   /// ⚠ **帧序号在所有 PacketType 之间共享** —— 心跳也消耗序号。
   ///   本条待下位机确认; 若约定改成"每种类型独立编号", 需按 type 各维护一个计数器。
+  ///
+  /// ⚠️ **状态标志字节**（见 `StatusFlag`）：本函数把
+  ///    `frame.odometry_reliable` / `frame.pose_valid` /
+  ///    `frame.sanctuary_valid` / `frame.held_count_valid` 打包成一个字节。
+  ///    ⚠️ **valid 位为 0 时对应字段照样写进字节流**（位置写 0 等），
+  ///       主控**必须按 valid 位忽略它们** —— 见 `StatusFlag` 上方的破坏性改动说明。
+  ///
   /// @return 字节流 + 实际写入的建筑位/障碍物数量 (用于判断是否截断)
   EncodeResult encode(const br_perception::msg::PerceptionFrame& frame);
 
   /// @brief 心跳帧 (类型 0x02, 空 payload)。同样消耗一个帧序号。
   std::vector<std::uint8_t> encode_heartbeat();
+
+  /// @brief 紧急停止帧 (类型 0x03, payload = timestamp_ms + estop)。
+  ///        同样消耗一个帧序号。
+  ///
+  /// @param active `true` = 要求主控停车；`false` = **解除**（能恢复行驶了）
+  /// @param stamp  **由调用方给**的时刻 —— 编码器**不持有时钟**，也不该自己取：
+  ///               本节点可能跑在 `use_sim_time` 下，自己取墙上时间会让
+  ///               紧急帧与感知帧的时间戳**不同源**，现场核对时对不上。
+  ///               统一由调用方（`comm_node`）决定用哪个时钟。
+  ///
+  /// ⚠️ **两个方向都要发** —— 只发"停车"不发"解除"，主控就永远停在那个状态。
+  ///    （`comm_node` 那边是按**状态变化**触发的，不是周期性发。）
+  ///
+  /// ⚠️ 本包**不做截断/限频**：它是安全信号，晚了就等于没发。
+  ///    调用方不要在它前面排队 —— 见 `comm_node` 里"紧急帧**绕过节流队列**"的处理。
+  std::vector<std::uint8_t> encode_estop(bool active,
+                                         const builtin_interfaces::msg::Time& stamp);
 
   /// @brief 调试帧 (类型 0x7F, payload = ASCII 原文), 供台架联调。
   ///

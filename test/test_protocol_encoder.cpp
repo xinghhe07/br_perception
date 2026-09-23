@@ -51,15 +51,19 @@ const std::uint8_t kDummy = 0;
 //               crc = ((crc << 1) ^ 0x1021) & 0xFFFF if (crc & 0x8000) else (crc << 1) & 0xFFFF
 //       return crc
 //   payload = bytes.fromhex('39300000' '9600' '1FFF' '0000' '8403' '64010000'
-//                           '010001' '2602CF03' '36' '0100' '0000')
+//                           '01000F' '2602CF03' '36' '0100' '0000')
 //   body = bytes([0xAA,0x55,0x00,0x01]) + struct.pack('<H', len(payload)) + payload
 //   print((body + struct.pack('<H', ccitt_false(body))).hex().upper())
 //
 // ⚠ 改了 payload 布局**必须重跑这个脚本**更新下面的常量。**不许直接把实现的输出贴进来** ——
 //   那样等于把外部验证退化成循环验证: 实现自己证明自己, 错了也照过。
+//
+// ⚠ 2026-09-22: payload 里 `01 00 0F` 的**第三个字节**原先是 `odometry_reliable`(0/1),
+//   现在改叫**状态标志字节**, 四位置满 = 0x0F（见 protocol_encoder.hpp 的 `StatusFlag`）。
+//   ⚠ **长度没变**（还是一个字节）—— 上面 `struct.pack('<H', len(payload))` 仍得 28。
 // ═══════════════════════════════════════════════════════════════════════════
 constexpr char kGoldenFrameHex[] =
-    "AA5500011C003930000096001FFF00008403640100000100012602CF0336010000005599";
+    "AA5500011C003930000096001FFF000084036401000001000F2602CF033601000000A1A0";
 
 /// 字节流 → 大写十六进制 (走 golden 比对用)
 std::string to_hex(const std::vector<std::uint8_t>& bytes)
@@ -148,6 +152,13 @@ br_perception::msg::PerceptionFrame make_frame()
   f.mustika_state = 1;                  // 柱上
   f.sanctuary_mandate_fulfilled = 0;
   f.odometry_reliable = 1;
+  // ⚠️ 2026-09-22 新增的三个**有效位**。编码器在它们为 false 时会把对应字段**清零**
+  //    （不变式，防"过期位置漏给主控"），所以这个"字段齐全"的测试帧必须把它们置 1
+  //    —— 否则下面 golden 帧里的坐标会全变 0。
+  //    "无效时清零"这条单独测：见 `FrameLayoutTest.有效位为假时位置一律写零`。
+  f.pose_valid = true;
+  f.sanctuary_valid = true;
+  f.held_count_valid = true;
   f.mustika_pose.pose.position.x = 5.5;    // 550
   f.mustika_pose.pose.position.y = 9.75;   // 975
   f.mustika_pose.pose.position.z = 0.54;   // 54
@@ -258,7 +269,7 @@ TEST(FrameLayoutTest, 逐字节校验最小帧)
       0x00,                     // match_end_release_warning
       0x01,                     // mustika_state = 1 (柱上)
       0x00,                     // sanctuary_mandate_fulfilled
-      0x01,                     // odometry_reliable
+      0x0F,                     // 状态标志字节 = 四位全置(见 StatusFlag); 原为 odometry_reliable=0x01
       0x26, 0x02,               // mustika_x_cm = 550
       0xCF, 0x03,               // mustika_y_cm = 975
       0x36,                     // mustika_z_cm = 54
@@ -282,6 +293,85 @@ TEST(FrameLayoutTest, 与独立Python实现逐字节一致)
   // **CRC 的覆盖范围与取值** (golden 里的 CRC 是脚本那份位逐位实现在整帧上算的;
   //  覆盖范围若不对, 这里必挂 —— 这正是上一条测试做不到的)
   EXPECT_EQ(std::string(kGoldenFrameHex), to_hex(r.bytes));
+}
+
+// ⚠️ 本条测的是**不变式**（2026-09-22 新增）：`pose_valid == false` 时，
+//    编码器必须把**所有**位置字段写成 0。
+//    这不是"省字节"，而是保证**过期/无效的位置一个都漏不出去** ——
+//    写 0 + valid=0：主控万一忘了看 valid 位，拿到的也是 0，
+//    而不是一个**看起来合理**的旧位置。
+//    不变式刻意放在**编码器**里：位置字段散在头部 / 穆斯蒂卡 / 建筑位 / 障碍物四处，
+//    放调用方迟早会漏掉某一个。
+TEST(FrameLayoutTest, 有效位为假时位置一律写零)
+{
+  // payload 各字段的字节偏移（与 .cpp 的写入顺序一一对应，改布局必须同步改这里）
+  constexpr std::size_t kOffSelfX   = 4;    // int16 self_pose_x_cm
+  constexpr std::size_t kOffSelfY   = 6;    // int16 self_pose_y_cm
+  constexpr std::size_t kOffMatch   = 12;   // uint8 match_remaining_sec
+  constexpr std::size_t kOffHeld    = 13;   // uint8 held_object_count
+  constexpr std::size_t kOffMustika = 16;   // uint8 mustika_state
+  constexpr std::size_t kOffFlags   = 18;   // uint8 状态标志字节
+  constexpr std::size_t kOffMustX   = 19;   // int16 mustika_x_cm
+  constexpr std::size_t kOffMustY   = 21;   // int16 mustika_y_cm
+  constexpr std::size_t kOffMustZ   = 23;   // int8  mustika_z_cm
+  constexpr std::size_t kHdr        = 6;    // 帧头+序号+类型+长度
+
+  ProtocolEncoder enc;
+  auto f = make_frame();               // 字段齐全（三个 valid 位都是 1）
+  f.pose_valid = false;                // ← 只关这一个
+
+  const EncodeResult r = enc.encode(f);
+  ASSERT_GE(r.bytes.size(), kHdr + kOffFlags + 1);
+
+  // ① 标志位本身：只剩 ODOM_RELIABLE|SANCTUARY_VALID|HELD_COUNT_VALID = 0x0D
+  EXPECT_EQ(0x0D, r.bytes[kHdr + kOffFlags])
+      << "只该掉 POSE_VALID 那一位(0x0F -> 0x0D)";
+
+  // ② **位置全变 0**
+  EXPECT_EQ(0x00, r.bytes[kHdr + kOffSelfX]);
+  EXPECT_EQ(0x00, r.bytes[kHdr + kOffSelfX + 1]);
+  EXPECT_EQ(0x00, r.bytes[kHdr + kOffSelfY]);
+  EXPECT_EQ(0x00, r.bytes[kHdr + kOffSelfY + 1]);
+  EXPECT_EQ(0x00, r.bytes[kHdr + kOffMustX]);
+  EXPECT_EQ(0x00, r.bytes[kHdr + kOffMustX + 1]);
+  EXPECT_EQ(0x00, r.bytes[kHdr + kOffMustY]);
+  EXPECT_EQ(0x00, r.bytes[kHdr + kOffMustY + 1]);
+  EXPECT_EQ(0x00, r.bytes[kHdr + kOffMustZ]);
+
+  // ③ ⚠️ **非位置字段不许被连带清掉** —— 这一半才是这条测试的价值所在：
+  //    只断言"位置变 0"的话，一个"把整个 payload 清零"的错误实现照样通过。
+  EXPECT_EQ(0x64, r.bytes[kHdr + kOffMatch])   << "比赛计时与该有效位无关";
+  EXPECT_EQ(0x01, r.bytes[kHdr + kOffHeld])    << "held_count_valid 仍为真";
+  EXPECT_EQ(0x01, r.bytes[kHdr + kOffMustika]) << "mustika_state 是 0/1/2..6 的状态码, 不是位置";
+}
+
+// ⚠️ 另一半：`sanctuary_valid` / `held_count_valid` 为假时，对应字段写 0。
+//    理由见 PerceptionFrame.msg —— 这两个字段**没有未知档**，
+//    填 0 就是替主控断言"使命未达成"/"一块都没拿"，所以必须配 valid 位一起用。
+TEST(FrameLayoutTest, 有效位为假时对应字段写零)
+{
+  constexpr std::size_t kOffHeld    = 13;
+  constexpr std::size_t kOffOver    = 14;   // holding_over_limit
+  constexpr std::size_t kOffSanct   = 17;   // sanctuary_mandate_fulfilled
+  constexpr std::size_t kOffFlags   = 18;
+  constexpr std::size_t kHdr        = 6;
+
+  ProtocolEncoder enc;
+  auto f = make_frame();
+  f.held_object_count = 2;             // 故意给个非零值，才能看出"被清掉了"
+  f.holding_over_limit = 1;
+  f.sanctuary_mandate_fulfilled = 1;
+  f.held_count_valid = false;
+  f.sanctuary_valid  = false;
+
+  const EncodeResult r = enc.encode(f);
+  ASSERT_GE(r.bytes.size(), kHdr + kOffFlags + 1);
+
+  // 只剩 ODOM_RELIABLE|POSE_VALID = 0x03
+  EXPECT_EQ(0x03, r.bytes[kHdr + kOffFlags]);
+  EXPECT_EQ(0x00, r.bytes[kHdr + kOffHeld])  << "无效 → 写 0，而不是把 2 发出去";
+  EXPECT_EQ(0x00, r.bytes[kHdr + kOffOver])  << "持握数无效时'是否超限'同样无意义";
+  EXPECT_EQ(0x00, r.bytes[kHdr + kOffSanct]) << "无效 → 写 0，而不是断言'使命已达成'";
 }
 
 TEST(FrameLayoutTest, CRC覆盖整帧而非仅payload)
@@ -314,6 +404,47 @@ TEST(FrameLayoutTest, 心跳帧)
   EXPECT_EQ(0x02, bytes[3]);                 // PacketType::HEARTBEAT
   EXPECT_EQ(0x00, bytes[4]);                 // 长度 0
   EXPECT_EQ(0x00, bytes[5]);
+}
+
+// ⚠️ 0x03 = 紧急停止。它存在的意义是让主控能**区分**：
+//      · 收到 0x03 estop=1 → 链路活着，是感知侧要求停车
+//      · 什么都没收到      → 链路死了
+//    这两件事的应对**正相反**（一个该等感知，一个该急停失能），
+//    而在此之前它们在主控侧完全不可区分。
+//
+//    本条只做**结构**断言（类型/长度/payload 逐字节）：CRC 机制已由上面
+//    golden 那两条覆盖，这里再算一遍 CRC 属于重复，且容易退化成循环验证。
+TEST(FrameLayoutTest, ESTOP帧结构)
+{
+  constexpr std::uint32_t kTsMs = 12345;
+
+  builtin_interfaces::msg::Time stamp;
+  stamp.sec = static_cast<std::int32_t>(kTsMs / 1000u);
+  stamp.nanosec = (kTsMs % 1000u) * 1000000u;
+
+  ProtocolEncoder enc;
+
+  // ── 触发 ──
+  const std::vector<std::uint8_t> on = enc.encode_estop(true, stamp);
+  ASSERT_EQ(6u + ProtocolConfig::kEstopPayloadBytes + 2u, on.size());
+  EXPECT_EQ(0xAA, on[0]);
+  EXPECT_EQ(0x55, on[1]);
+  EXPECT_EQ(0x00, on[2]);                    // 首帧序号
+  EXPECT_EQ(0x03, on[3]);                    // PacketType::ESTOP
+  EXPECT_EQ(0x05, on[4]);                    // 长度 5 (uint32 + uint8)
+  EXPECT_EQ(0x00, on[5]);
+  EXPECT_EQ(0x39, on[6]);                     // timestamp_ms = 12345 小端
+  EXPECT_EQ(0x30, on[7]);
+  EXPECT_EQ(0x00, on[8]);
+  EXPECT_EQ(0x00, on[9]);
+  EXPECT_EQ(static_cast<std::uint8_t>(kEstopActive), on[10]);
+
+  // ── ⚠️ 解除**也要发** —— 只发"停车"不发"解除"，主控会永远停在那个状态 ──
+  const std::vector<std::uint8_t> off = enc.encode_estop(false, stamp);
+  ASSERT_EQ(on.size(), off.size());
+  EXPECT_EQ(0x03, off[3]);
+  EXPECT_EQ(static_cast<std::uint8_t>(kEstopClear), off[10]);
+  EXPECT_EQ(0x01, off[2]) << "第二帧序号应为 1 —— 紧急帧同样消耗序号(与其他包共享)";
 }
 
 TEST(FrameLayoutTest, 长度字段等于payload实际字节数)

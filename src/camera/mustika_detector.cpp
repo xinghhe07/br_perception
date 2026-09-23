@@ -178,21 +178,25 @@ MustikaDetector::MustikaDetector(const rclcpp::NodeOptions& options)
   param_callback_handle_ = this->add_on_set_parameters_callback(
     std::bind(&MustikaDetector::on_parameter_change, this, std::placeholders::_1));
 
-  // ── 订阅预处理图像 (前/后双路) ──
-  // ⚠ 与 image_preprocessor 的发布端保持同为 BEST_EFFORT (SensorDataQoS), 两侧一起改
+  // ── 订阅预处理图像 (宽/长焦双路) ──
+  // ⚠ BEST_EFFORT + **队列深度 1**（任务书 §3.0 硬约束第 2 条）——
+  //    完整理由写在 `image_preprocessor.cpp` 的 `stream_qos` 那一段。
+  //    **上游发布端与本处必须同为 depth=1**, 只改一侧等于没改。
+  const auto stream_qos = rclcpp::QoS(1).best_effort();
+
   sub_wide_ = this->create_subscription<br_perception::msg::PreprocessedImage>(
-    "/perception/camera_wide/preprocessed", rclcpp::SensorDataQoS(),
+    "/perception/camera_wide/preprocessed", stream_qos,
     std::bind(&MustikaDetector::wide_callback, this, std::placeholders::_1));
 
   sub_tele_ = this->create_subscription<br_perception::msg::PreprocessedImage>(
-    "/perception/camera_tele/preprocessed", rclcpp::SensorDataQoS(),
+    "/perception/camera_tele/preprocessed", stream_qos,
     std::bind(&MustikaDetector::tele_callback, this, std::placeholders::_1));
 
   // ── 发布穆斯蒂卡检测结果 ──
   pub_wide_ = this->create_publisher<br_perception::msg::CameraMustika>(
-    "/perception/camera/mustika_wide", rclcpp::SensorDataQoS());
+    "/perception/camera/mustika_wide", stream_qos);
   pub_tele_ = this->create_publisher<br_perception::msg::CameraMustika>(
-    "/perception/camera/mustika_tele", rclcpp::SensorDataQoS());
+    "/perception/camera/mustika_tele", stream_qos);
 
   // ── 诊断 ──
   pub_diagnostics_ = this->create_publisher<diagnostic_msgs::msg::DiagnosticArray>(

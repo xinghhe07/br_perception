@@ -24,6 +24,8 @@ def generate_launch_description():
     pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     lidar_params = os.path.join(pkg_dir, 'config', 'lidar_params.yaml')
     field_geometry = os.path.join(pkg_dir, 'config', 'field_geometry.yaml')
+    # 调试开关单一事实源（任务书 §1.7）。⚠️ 传给节点时**必须排在 lidar_params 之后**
+    debug_flags = os.path.join(pkg_dir, 'config', 'debug_flags.yaml')
 
     # ── Launch 参数 ──
     test_mode_la = DeclareLaunchArgument(
@@ -47,7 +49,10 @@ def generate_launch_description():
         executable='lidar_perception_node',
         name='lidar_perception_node',
         output='screen',
-        parameters=[lidar_params, field_geometry],
+        # ⚠️ `debug_flags.yaml` **必须排在最后**（后者覆盖前者）——
+        #    与 bringup_full / bringup_lidar_only 保持同一套调试开关，
+        #    免得"换个 launch 起，调试输出的行为就不一样"。
+        parameters=[lidar_params, field_geometry, debug_flags],
     )
 
     # ═══════════════════════════════════════════════════════════════════════

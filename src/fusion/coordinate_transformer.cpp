@@ -83,6 +83,19 @@ CoordinateTransformer::CoordinateTransformer(rclcpp::Node* node,
 
   tf_buffer_      = std::make_unique<tf2_ros::Buffer>(node_->get_clock());
   tf_listener_    = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
+  // ⚠️⚠️ **TF 广播没有开关，也不允许有。**
+  //
+  //    容易被误加的一个"调试开关"是 `publish_tf_tree`（任务书 §1.7 提过这个键名）。
+  //    它**不能**接在这里：TF 不是调试输出，是**功能本身** ——
+  //    融合层（模块 20/21）、`perception_pipeline` 的 world 坐标、
+  //    任何要 TF 变换的东西**全都依赖这棵树**。把它关掉不是"省性能"，
+  //    是**把融合层整个打掉**，而且症状是"下游莫名收不到/算不出坐标"，
+  //    没人会往"有人关了个调试开关"上想。
+  //
+  //    ⇒ 该键已从 `config/debug_flags.yaml` **删除**（留了墓碑注释）。
+  //       真要可视化 TF 树，那是 RViz 的显示项，不是节点参数。
+  //    ⚠️ 在 `config/debug_flags.yaml` 里也写了同一条 —— 想加这个开关的人
+  //       应当**在两处都撞到**这堵墙。
   tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(node_);
 
   // 里程计 — Point-LIO (ROS2 移植版) 输出; 该移植版默认发 /aft_mapped_to_init

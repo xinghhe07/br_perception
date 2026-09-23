@@ -108,8 +108,12 @@ def generate_launch_description():
     lidar_pipeline = Node(
         package='br_perception', executable='lidar_perception_node',
         name='lidar_perception_node', output='screen',
+        # ⚠️ `debug_flags.yaml` **必须排在最后**（后者覆盖前者）——
+        #    本 launch 是台架用，默认仍会拿到它里面关掉的 `debug_enabled`；
+        #    要点云就**改 config/debug_flags.yaml**，别改这里（单一开关）。
         parameters=[os.path.join(share_dir, 'config', 'lidar_params.yaml'),
-                    os.path.join(share_dir, 'config', 'field_geometry.yaml')])
+                    os.path.join(share_dir, 'config', 'field_geometry.yaml'),
+                    os.path.join(share_dir, 'config', 'debug_flags.yaml')])
 
     perception_rviz_node = Node(
         package='rviz2', executable='rviz2', name='rviz2', output='screen',

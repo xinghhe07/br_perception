@@ -74,6 +74,7 @@ include_directories(
   src/fusion/include
   src/utils/include
   src/communication/include
+  src/core/include          # 2026-09-22: perception_pipeline (模块 27)
   ${PCL_INCLUDE_DIRS}
   ${OpenCV_INCLUDE_DIRS}
 )
@@ -300,6 +301,39 @@ target_include_directories(common_utils PUBLIC src/utils/include)
 target_link_libraries(common_utils Eigen3::Eigen)
 
 # ═══════════════════════════════════════════════════════════════════════════
+# 14b. PerceptionPipeline — 感知编排与降级薄壳 (任务书 §6.1 模块 27)
+#
+#      把各层结果组装成"要发给主控的那一帧", 并在某层死掉时如实降级。
+#      **补的是断链**: `/perception/output` 是 comm_node 唯一的上行入口,
+#      而在此之前全仓库没有发布者 —— 下位机一帧都收不到。
+#
+#      ⚠️ **刻意不走 add_lidar_component 宏** —— 那个宏无条件链 PCL, 而本节点
+#         不碰点云也不碰图像(它只转坐标 + 打包小消息)。走宏会白白挂上 PCL 依赖。
+#         (与 camera_perception_component / comm_node_component 同一处理。)
+#
+#      ⚠️ **必须排在 coordinate_transformer 与 common_utils 之后** ——
+#         本目标链接这两个库, CMake 要求被链目标先定义。
+#         依赖关系(rclcpp 之外):
+#           · coordinate_transformer —— TF 到 world + 里程计可靠性(模块 17)
+#           · common_utils           —— timer_utils 的 FpsCounter / StageProfiler /
+#                                       classify_latency (**复用, 不重造**)
+#
+#      ⚠️ 本目标**不依赖 PCL / OpenCV / cv_bridge**。将来若有人往本节点里塞图像
+#         处理, 链接会失败 —— 那是**故意的**: 它是个编排薄壳, 不该长成算法节点。
+# ═══════════════════════════════════════════════════════════════════════════
+add_library(perception_pipeline_component SHARED
+  src/core/perception_pipeline.cpp)
+ament_target_dependencies(perception_pipeline_component
+  rclcpp rclcpp_components std_msgs diagnostic_msgs geometry_msgs)
+target_link_libraries(perception_pipeline_component
+  coordinate_transformer
+  common_utils
+  ${cpp_typesupport_target})
+rclcpp_components_register_node(perception_pipeline_component
+  PLUGIN "br_perception::core::PerceptionPipeline"
+  EXECUTABLE perception_pipeline)
+
+# ═══════════════════════════════════════════════════════════════════════════
 # 15. Communication — 协议编解码 + 串口传输 (任务书 §5.1 / §5.2 / §5.3)
 #     · encoder/decoder 共用同一份 Crc16 与帧格式定义 (decoder 头文件直接 include
 #       encoder 头文件), 拆开只会多一层没必要的依赖边
@@ -402,6 +436,7 @@ install(TARGETS
   pillar_detector
   camera_depth
   camera_perception_node
+  perception_pipeline
   comm_node
   DESTINATION lib/${PROJECT_NAME})
 
@@ -420,6 +455,7 @@ install(TARGETS
   pillar_detector_component
   camera_depth_component
   camera_perception_component
+  perception_pipeline_component
   coordinate_transformer
   common_utils
   communication

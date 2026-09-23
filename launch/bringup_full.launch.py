@@ -8,7 +8,9 @@
   3. Livox CustomMsg → PointCloud2 桥接 (感知管线要 PointCloud2)
   4. 静态外参 TF (base_link ← 传感器)  ⚠ 占位值, 标定后回填 fusion_params.yaml
   5. 雷达感知管线                    (br_perception: lidar_perception_node)
-  6. 融合/通信/健康监控               ⬜ 待实现 (§4.5 fusion_node / §7 / §13)
+  6. 感知编排与降级                   (br_perception: perception_pipeline, 模块 27)
+                                      → 组装 /perception/output (通信层唯一上行入口)
+  7. 融合/通信/健康监控               ⬜ 待实现 (§4.5 fusion_node / §7 / §13)
 
 前置 (必须先 source, 否则找不到驱动与里程计包):
   source /opt/ros/humble/setup.bash
@@ -136,8 +138,26 @@ def generate_launch_description():
     lidar_pipeline = Node(
         package='br_perception', executable='lidar_perception_node',
         name='lidar_perception_node', output='screen',
+        # ⚠️ `debug_flags.yaml` **必须排在最后** —— ROS 2 参数**后者覆盖前者**，
+        #    而它里面的 `debug_enabled` 要盖掉 `lidar_params.yaml:86` 的 `true`。
+        #    比赛模式要求"调试全部关闭"（任务书 §1.7），那个 true 是给台架用的。
+        #    ⚠️ 顺序写反 = 调试点云在比赛时照发，且**不会报任何错**。
         parameters=[os.path.join(pkg_share, 'config', 'lidar_params.yaml'),
-                    os.path.join(pkg_share, 'config', 'field_geometry.yaml')])
+                    os.path.join(pkg_share, 'config', 'field_geometry.yaml'),
+                    os.path.join(pkg_share, 'config', 'debug_flags.yaml')])
+
+    # ── 6. 感知编排与降级 (模块 27) ──
+    #    ⚠️ **必须传两份 yaml**: fusion_params.yaml 提供 TF 的坐标系名与里程计参数
+    #       (CoordinateTransformer 的 load_from_node 读它们)。缺了这份 → TF 取默认名
+    #       → 与雷达结果的实际坐标系对不上 → **一帧都发不出去**(且不报错, 只报 TF 失败)。
+    #    ⚠️ 本节点内部会起一个 CoordinateTransformer, 因此**它广播 odom→base_link /
+    #       world→odom**。目前 fusion_node(模块21)不存在, 没人广播 → 这里正好补上;
+    #       **fusion_node 落地后两个广播器会打架, 必须二选一**(见 pkg 的 perception_pipeline.hpp)。
+    perception_pipeline = Node(
+        package='br_perception', executable='perception_pipeline',
+        name='perception_pipeline', output='screen',
+        parameters=[os.path.join(pkg_share, 'config', 'perception_params.yaml'),
+                    os.path.join(pkg_share, 'config', 'fusion_params.yaml')])
 
     perception_rviz_node = Node(
         package='rviz2', executable='rviz2', name='rviz2', output='screen',
@@ -165,5 +185,6 @@ def generate_launch_description():
         point_lio,
         custom_to_pcl2,
         lidar_pipeline,
+        perception_pipeline,
         perception_rviz_node,
     ])

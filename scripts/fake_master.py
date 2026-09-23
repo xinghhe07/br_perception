@@ -62,7 +62,23 @@ CRC_BYTES = 2
 
 TYPE_PERCEPTION = 0x01
 TYPE_HEARTBEAT = 0x02
+# 紧急停止 (原 0x03 ERROR, 2026-09-22 收窄语义并实现)。
+# ⚠️ 台架联调**必须认得它** —— 否则"紧急停止到底有没有上线"这件事
+#    在伪下位机这一侧根本验证不了, 而那正是这个包存在的唯一理由。
+#    payload = uint32 timestamp_ms(小端) + uint8 estop(0=解除 1=要求停车)
+TYPE_ESTOP = 0x03
 TYPE_BR_RESET = 0x10
+
+ESTOP_CLEAR = 0
+ESTOP_ACTIVE = 1
+
+
+def decode_estop(payload):
+    """解 0x03 payload → dict; 长度不符返回 None (**拒绝而不是猜**)。"""
+    if len(payload) != 5:
+        return None
+    ts = int.from_bytes(payload[0:4], 'little')
+    return {'timestamp_ms': ts, 'estop': payload[4]}
 
 # BR_RESET 的 zone (任务书 §5.1 v1.6)。扩展新 zone 时改这里 +
 # ProtocolDecoder::kMaxKnownResetZone + 协议表 —— 三处。
@@ -93,8 +109,13 @@ CHECK_VECTORS = [
 # 若 HDR_FMT / MUSTIKA_FMT 等的列顺序与 protocol_encoder.cpp 的 put_* 顺序不一致,
 # 本文件内部自洽却与 C++ 不通 —— 只有这条能发现。
 # 再生成方式见 test_protocol_encoder.cpp (跑那段 Python 脚本, 贴回这里与测试里)。
-GOLDEN_FRAME_HEX = ('AA5500011C003930000096001FFF00008403640100000100012602CF033601000000'
-                    '5599')
+# ⚠️ 2026-09-22: 与 test/test_protocol_encoder.cpp 的 kGoldenFrameHex **必须逐字符一致**。
+#    本次改动: payload 第 19 字节 (索引 18) 由 `01`(odometry_reliable) 改为 `0F`
+#    (状态标志字节, 四位全置) —— 帧长仍是 28, 只有 CRC 跟着变 (5599 → A1A0)。
+#    ⚠️ **改了协议布局, 这份常量与 C++ 那份要一起改** —— 两边不同步的话,
+#       联调时表现是"伪下位机自检通过、但对端发来的帧全解不动", 很难往这上面想。
+GOLDEN_FRAME_HEX = ('AA5500011C003930000096001FFF000084036401000001000F2602CF033601000000'
+                    'A1A0')
 
 # 单帧 payload 上界 —— **必须与 ProtocolConfig::max_payload_bytes 一致**。
 # 由字段构成算出, 不写死 272: 26 (头16+穆8+柱2) + (1 + 4×16 建筑位) + (1 + 18×10 障碍物)
@@ -244,7 +265,10 @@ def parse_stream(buf):
 # ═══════════════════════════════════════════════════════════════════════════
 
 HDR_FMT = '<IhhhhBBBB'        # 16B: ts_ms, x/y/z_cm, yaw_deg10, 比赛态×4
-MUSTIKA_FMT = '<BBBhhb'       #  8B: status, sanctuary, odom, x/y/z_cm
+# ⚠️ 第 3 个 B 原叫 `odometry_reliable`(0/1), 2026-09-22 起是**状态标志字节**:
+#    bit0=里程计可靠 bit1=位置有效 bit2=圣所字段有效 bit3=持握数字段有效
+#    (见 protocol_encoder.hpp 的 StatusFlag)。**别再按 0/1 读它。**
+MUSTIKA_FMT = '<BBBhhb'       #  8B: status, sanctuary, flags, x/y/z_cm
 PILLAR_FMT = '<BB'            #  2B: 穆斯蒂卡柱/核心柱 occupied
 SPOT_FMT = '<BBBB'            #  4B: spot_id, state, top_color, ownership
 OBS_FMT = '<BhhbBBBBBHBBbbB'  # 18B: id,x,y,z,w,d,h,type,ally,dwell,push,held,vx,vy,threat
@@ -402,6 +426,32 @@ def selftest():
         check('障碍数 == 1 且 id == 7', d is not None and d['obstacles'][0]['id'] == 7)
         check('障碍速度 == (5,-10)', d is not None and d['obstacles'][0]['v'] == (5, -10))
 
+    log('\n紧急停止 (0x03) 往返 —— ⚠️ 这条是"停车指令到底能不能上线"的台架判据:')
+    # 位逐位构造, 与 C++ 的 encode_estop 无关 (不能拿被测实现证明被测实现)
+    ts_ms = 12345
+    estop_payload_on = struct.pack('<IB', ts_ms, ESTOP_ACTIVE)
+    ef, erest, eg, ecrc = parse_stream(build_frame(0, TYPE_ESTOP, estop_payload_on))
+    check('触发帧: 解出 1 帧且无残余/垃圾/CRC 错',
+          len(ef) == 1 and erest == b'' and eg == 0 and ecrc == 0)
+    if ef:
+        check('type == 0x03', ef[0]['type'] == TYPE_ESTOP)
+        check('payload 5 字节', len(ef[0]['payload']) == 5)
+        d = decode_estop(ef[0]['payload'])
+        check('可解', d is not None)
+        if d:
+            check('timestamp_ms == {}'.format(ts_ms), d['timestamp_ms'] == ts_ms)
+            check('estop == 1 (要求停车)', d['estop'] == ESTOP_ACTIVE)
+
+    estop_payload_off = struct.pack('<IB', ts_ms, ESTOP_CLEAR)
+    ef2, _, _, _ = parse_stream(build_frame(1, TYPE_ESTOP, estop_payload_off))
+    check('解除帧: 解出 1 帧', len(ef2) == 1)
+    if ef2:
+        d2 = decode_estop(ef2[0]['payload'])
+        # ⚠️ **解除方向必须也能解** —— 只发停车不发解除, 主控会永远停在那个状态
+        check('estop == 0 (解除)', d2 is not None and d2['estop'] == ESTOP_CLEAR)
+
+    check('长度不符时拒绝而不是猜', decode_estop(b'\x00\x01\x02') is None)
+
     log('\n流式边界:')
     junk = b'\x00\xFF' + build_frame(0, TYPE_PERCEPTION, payload)[:5]
     f2, _, g2, _ = parse_stream(junk)
@@ -552,6 +602,7 @@ def main():
     counter = SeqCounter(args.seq_start)
     buf = b''
     n_frames = n_crc_err = n_garbage = n_reset_sent = n_hb_sent = 0
+    n_estop = n_estop_active = 0
     reset_sent = False
 
     def send(ptype, payload, note):
@@ -598,7 +649,8 @@ def main():
 
             for fr in frames:
                 n_frames += 1
-                kind = {TYPE_PERCEPTION: '感知帧', TYPE_HEARTBEAT: '心跳'}.get(
+                kind = {TYPE_PERCEPTION: '感知帧', TYPE_HEARTBEAT: '心跳',
+                        TYPE_ESTOP: '**紧急停止**'}.get(
                     fr['type'], '未知类型 0x{:02X}'.format(fr['type']))
                 log('\n[收←] #{:<4} seq={:<3} 类型={} payload={}字节'.format(
                     n_frames, fr['seq'], kind, len(fr['payload'])))
@@ -607,6 +659,18 @@ def main():
                     d = decode_perception(fr['payload'])
                     log(format_perception(d) if d else
                         '  payload 解不动 (长度或布局不符) —— 拒绝而不是猜')
+
+                if fr['type'] == TYPE_ESTOP:
+                    d = decode_estop(fr['payload'])
+                    if d is None:
+                        log('  payload 解不动 (长度应为 5) —— 拒绝而不是猜')
+                    else:
+                        n_estop += 1
+                        if d['estop'] == ESTOP_ACTIVE:
+                            n_estop_active += 1
+                        log('  timestamp_ms={} estop={} ({})'.format(
+                            d['timestamp_ms'], d['estop'],
+                            '要求停车' if d['estop'] == ESTOP_ACTIVE else '解除'))
 
                 if args.heartbeat_every and n_frames % args.heartbeat_every == 0:
                     send(TYPE_HEARTBEAT, b'', '心跳')
@@ -629,6 +693,10 @@ def main():
     log('CRC 错误      : {}'.format(n_crc_err))
     log('同步丢弃字节  : {}'.format(n_garbage))
     log('发出 心跳/复位: {} / {}'.format(n_hb_sent, n_reset_sent))
+    # ⚠️ 单列紧急停止 —— 这一行就是"停车指令到底上线没有"的**台架判据**。
+    #    只在真有 0x03 时才多打一行, 免得正常联调时噪音。
+    if n_estop:
+        log('收到 紧急停止  : {} 帧 (其中"要求停车" {} 帧)'.format(n_estop, n_estop_active))
     log('未解析残余    : {} 字节'.format(len(buf)))
     if n_crc_err:
         log('⚠ 有 CRC 错误 —— 先核对两端的 CRC 参数 (多项式/初值/反射/异或出口)')

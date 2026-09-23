@@ -7,6 +7,15 @@
 #include <std_msgs/msg/float32_multi_array.hpp>
 #include <std_msgs/msg/color_rgba.hpp>
 
+// ── 对外数据接口 (设计文档 §5.1) ──
+// ⚠️ 2026-09-22 接上: `LidarResult.msg` 建于 2026-09-18, 但**一直没有被任何代码引用** ——
+//    本节点当时发的仍是 `diagnostic_msgs/DiagnosticArray`（"给人看的", 见该 msg 头注释）。
+//    机器可读的雷达数据接口因此实际上不存在, 融合层无从对接。
+#include "br_perception/msg/lidar_result.hpp"
+#include "br_perception/msg/obstacle.hpp"
+#include "br_perception/msg/building_spot.hpp"
+#include "br_perception/msg/pillar_status.hpp"
+
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl/ModelCoefficients.h>
@@ -155,9 +164,12 @@ struct LidarPerceptionResult {
  *   /perception/lidar/building_spots   (MarkerArray)
  *
  * 统一输出:
- *   /perception/lidar/result           (DiagnosticArray, 聚合所有结果)
+ *   /perception/lidar/result           (**LidarResult**, 对外数据接口, 设计文档 §5.1)
+ *                                      ⚠️ 2026-09-22 由 DiagnosticArray 改过来 ——
+ *                                         此前发的是给人看的计数文本, 融合层没法用。
+ *                                         ⚠️ header.frame_id **继承输入点云**, 不是 "world"
  *   /perception/lidar/debug_cloud      (PointCloud2, debug_flags 开启时)
- *   /perception/lidar/diagnostics      (DiagnosticArray, 各阶段耗时)
+ *   /perception/lidar/diagnostics      (DiagnosticArray, 各阶段耗时 + 平面系数 + 分类计数)
  *
  * 异常处理:
  *   - 雷达断连: 超时检测 → RCLCPP_WARN + radar_connected=false, 不崩溃
@@ -274,7 +286,12 @@ private:
                             const std::vector<BuildingSpot>& spots,
                             const std_msgs::msg::Header& header);
 
-  void publish_unified_result(const LidarPerceptionResult& result);
+  /// @brief 发布对外数据接口 `LidarResult`（话题 `/perception/lidar/result`）
+  /// @param result   本帧感知结果
+  /// @param frame_id **原样继承输入点云**的坐标系名 —— 本节点不做任何坐标变换，
+  ///                 **不要在这里写死 "world"**（那是融合层的产出，见实现注释）
+  void publish_unified_result(const LidarPerceptionResult& result,
+                              const std::string& frame_id);
 
   void publish_debug_cloud(const PointCloudPtr& ground,
                            const PointCloudPtr& non_ground,
@@ -304,7 +321,12 @@ private:
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub_spots_;
 
   // 统一输出
-  rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr pub_result_;
+  /// @brief 对外**数据**接口 (LidarResult)。
+  ///        ⚠️ 2026-09-22 从 `DiagnosticArray` 改过来 —— 那条话题此前发的是给人看的计数文本,
+  ///           下游（融合/编排）没法拿它当数据用。诊断内容已移到 `pub_diagnostics_`。
+  rclcpp::Publisher<br_perception::msg::LidarResult>::SharedPtr        pub_result_;
+  /// @brief 诊断接口 (DiagnosticArray) —— 2026-09-22 起**同时**承载原来塞在 result 里的
+  ///        平面系数/各层点数/分类计数（那些是给人看的, 本来就该在这）
   rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr pub_diagnostics_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_debug_cloud_;
 
