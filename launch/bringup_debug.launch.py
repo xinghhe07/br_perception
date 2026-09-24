@@ -105,6 +105,12 @@ NODE_SPECS = [
     ('mustika_detector',        'br_perception::camera::MustikaDetector',          'mustika_detector',       True),
     ('pillar_detector',         'br_perception::camera::PillarDetector',           'pillar_detector',        True),
     ('building_spot_detector',  'br_perception::camera::BuildingSpotDetector',     'building_spot_detector', True),
+    # ⚠️ 2026-09-23 新增（模块 9）。**用颜色** ⇒ uses_color=True，
+    #    launch 会把 color_yaml_path 覆盖成 install 空间的**绝对路径**
+    #    （`camera_params.yaml` 里写的是相对 $PWD 的字符串，不覆盖就找不到阈值文件）。
+    #    ⚠️ 它**只做判色、不做检测**：得分场景的 ROI 应来自雷达建筑位投影（**尚未实现**），
+    #       现在靠 `debug_roi_ratio` 手动指一个区域才能出结果 —— 见它在 camera_params.yaml 的块。
+    ('sky_block_detector',      'br_perception::camera::SkyBlockDetector',         'sky_block_detector',     True),
     ('camera_depth',            'br_perception::camera::CameraDepthNode',          'camera_depth',           False),
     ('camera_perception',       'br_perception::camera::CameraPerceptionNode',     'camera_perception_node', False),
 ]

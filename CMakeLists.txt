@@ -59,6 +59,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   #      所以这里没有能证明该点的先例; 真遇到解析失败, 再考虑调序)。
   "msg/SlotStatus.msg"
   "msg/CameraFrame.msg"
+  # 2026-09-23 新增: 天空方块顶面颜色 (§15.1 模块 9)
+  "msg/CameraSkyBlock.msg"
   # std_msgs: PerceptionFrame 与 LidarResult 都用了 std_msgs/Header
   DEPENDENCIES geometry_msgs std_msgs builtin_interfaces diagnostic_msgs sensor_msgs
 )
@@ -206,6 +208,36 @@ target_link_libraries(pillar_detector_component
   ${OpenCV_LIBRARIES}
   vision_utils
   ${cpp_typesupport_target})
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 11a2. SkyBlockDetector — 天空方块「顶面颜色」判定 (任务书 §3.3, 模块 9)
+#
+#      值多少分: 规则 3.5.6 —— Sky Block 按**顶面颜色**计分; 3.5.7 说明
+#      "颜色朝上的那队算完成这座塔（**哪怕底下的地球块是对手的**）";
+#      3.5.8 允许对手**翻转**它偷塔 ⇒ 这是 40/80 分归属的唯一来源,
+#      而雷达对颜色无能为力 (`building_spot_analyzer` 只置 needs_visual_check)。
+#
+#      ⚠️ 本目标**只做判色，不做检测**（检测要 YOLO26n ONNX, 那套基础设施
+#         仓库里一样都没有, 见该节点头文件的"只做判色"一节）。
+#
+#      ⚠️ 刻意**不走 `add_lidar_component` 宏** —— 那个宏无条件链 PCL, 而本节点
+#         只碰 OpenCV 图像, **不碰点云**（同 `mustika_pillar_check` 与 11c 节的
+#         相机聚合薄壳; 容器化时 PCL 是个真负担）。
+#      ⚠️ 依赖列表**照抄 `mustika_detector_component`**（同层的检测器, 已验证的
+#         组合）: 少了 `cv_bridge` 会报找不到 cv_bridge 头; 少了 `vision_utils`
+#         会在链接期报 color_utils 的符号未定义。
+# ═══════════════════════════════════════════════════════════════════════════
+add_library(sky_block_detector_component SHARED
+  src/camera/sky_block_detector.cpp)
+ament_target_dependencies(sky_block_detector_component
+  rclcpp rclcpp_components sensor_msgs diagnostic_msgs cv_bridge)
+target_link_libraries(sky_block_detector_component
+  ${OpenCV_LIBRARIES}
+  vision_utils
+  ${cpp_typesupport_target})
+rclcpp_components_register_node(sky_block_detector_component
+  PLUGIN "br_perception::camera::SkyBlockDetector"
+  EXECUTABLE sky_block_detector)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 11b. CameraDepthNode — D435i 深度辅助 (§3.0 三相机并行)
@@ -467,6 +499,7 @@ install(TARGETS
   mustika_detector
   building_spot_detector
   pillar_detector
+  sky_block_detector
   camera_depth
   camera_perception_node
   perception_pipeline
@@ -487,6 +520,7 @@ install(TARGETS
   mustika_detector_component
   building_spot_detector_component
   pillar_detector_component
+  sky_block_detector_component
   camera_depth_component
   camera_perception_component
   perception_pipeline_component
