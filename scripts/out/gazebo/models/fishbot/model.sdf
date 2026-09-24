@@ -89,12 +89,12 @@
 
       <!-- 两路工业相机 + IMU 的外壳 (尺寸/位置对应下面各 <sensor> 的 <pose>) -->
       <visual name="camera_wide_visual">
-        <pose>0.1 0 0.1669 0 0 0</pose>
+        <pose>0.1 0 0.60 0 0 0</pose>
         <geometry><box><size>0.02 0.02 0.02</size></box></geometry>
         <material><ambient>0.1 0.25 0.7 1</ambient><diffuse>0.1 0.25 0.7 1</diffuse></material>
       </visual>
       <visual name="camera_tele_visual">
-        <pose>0.1 0 0.1669 0 0 0</pose>
+        <pose>0.1 0 0.60 0 0 0</pose>
         <geometry><box><size>0.02 0.02 0.02</size></box></geometry>
         <material><ambient>0.7 0.25 0.1 1</ambient><diffuse>0.7 0.25 0.1 1</diffuse></material>
       </visual>
@@ -166,7 +166,7 @@
       <!-- ─── 宽角相机 → /camera_wide/image_raw ───
            ⚠️ 2026-09-23 改名: 原名 `cam_front`(前相机)。改名的理由见下一条 -->
       <sensor name="cam_wide_s" type="camera">
-        <pose>0.1 0 0.1669 0 0 0</pose>
+        <pose>0.1 0 0.60 0 0 0</pose>
         <always_on>1</always_on>
         <update_rate>30</update_rate>
         <camera>
@@ -220,7 +220,7 @@
               刻意不编一个假的偏移，免得将来标定完还要回来同步两处假数据。
               标定落地后，**本处 pose 与 launch 里的静态 TF 要一起改**。 -->
       <sensor name="cam_tele_s" type="camera">
-        <pose>0.1 0 0.1669 0 0 0</pose>
+        <pose>0.1 0 0.60 0 0 0</pose>
         <always_on>1</always_on>
         <update_rate>30</update_rate>
         <camera>
