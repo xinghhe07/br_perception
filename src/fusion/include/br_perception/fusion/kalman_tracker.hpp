@@ -1,316 +1,285 @@
 #pragma once
 
-/// ═══════════════════════════════════════════════════════════════════════════
-/// kalman_tracker.hpp — 多目标卡尔曼追踪 (任务书 §4.2, 模块 18)
-///
-/// 依赖: **Eigen3** (仅头文件库) —— 无 ROS / PCL / OpenCV。
-///
-/// 职责 (§4.2 任务清单, **本文件冻结的是纯算法核心**):
-///   1. 6 状态卡尔曼滤波器 [x, y, z, vx, vy, vz] (恒速模型)  → KalmanFilter6
-///   2. 每个追踪目标维护独立滤波器                            → Track::filter
-///   3. 预测步骤 (每帧执行) + 超时删除                        → predictAll()
-///   4. 更新步骤 (有测量值时执行; 未命中的建新目标)            → applyDetections()
-///   5. 追踪状态机 CANDIDATE / CONFIRMED / LOST               → Track::state
-///   6. v1.2 建筑位顶部目标不受 LOST 删除约束                 → keep_on_spot_frames
-///   7. v1.2 推移轨迹检测 → suspected_pushing                 → detectPushing()
-///   8. v1.3 持握目标 (高置信视觉 + 无雷达匹配) → is_held     → Detection::is_held
-///   9. v1.6 clear_mobile_tracks(keep_categories)             → clearMobileTracks()
-///  10. v1.6 held_object_count                                → heldObjectCount()
-///  11. 每个追踪目标存 id / 历史轨迹 / 速度 / 类别 / 置信度    → Track
-///
-/// ⚠ 刻意不做: 不发布 ROS topic (归 fusion_node); 不做单目 PnP (归
-///   coordinate_transformer); 不做观测↔追踪关联 (归 target_associator / 模块 19)。
-///
-/// ═══ 相对 v1 的优化 (本轮修订) ═══
-///   1. confirmedTrackRefs(): **零拷贝**访问 CONFIRMED 轨迹 (const Track* 视图),
-///      替代每帧深拷贝整个 Track (含 6×6 协方差 + 历史 deque)。confirmedTracks()
-///      保留为兼容包装。
-///   2. MatchIndex + applyDetections(): 对 Match 建一次索引 (detection→track 命中表 +
-///      track→detection)。**命中更新与建新目标合并成单次调用**, 好让"索引只建一次"
-///      在结构上成立 —— 拆成两个方法就只能各建一次, 优化目标会落空。
-///      匹配查找从 O(N·M) 降到 O(N+M)。
-///   3. predict(): 对角过程噪声改为 P.diagonal() += noise, 省掉 Q 矩阵构造与
-///      整矩阵加; dt ≤ 0 在最底层防御 (该类独立单测, 不能只靠调用方过滤)。
-///   4. clearMobileTracks 改 const 引用传参; 补 noexcept / [[nodiscard]]。
-///
-/// ⚠ 与 target_associator (模块 19) 的分工: 关联不在本模块。调用方先跑模块 19
-///   拿到 Match 列表, 再把 detections + matches 一起喂给 applyDetections()。
-///
-/// ═══ 任务书未定义、本文件自行判定的 5 处 (实现前请确认) ═══
-///   A. 删除判据 max_prediction_age 与 delete_frame_count **任一满足即删**。
-///   B. keep_on_spot_frames 从**最后一次被观测**起算 (丢失计时), 非创建起算。
-///   C. Q = diag(process_noise) 逐步累加不乘 dt; R = 标量 × I₃ (各向同性)。
-///   D. dt ≤ 0 → 跳过预测但不清状态, 计入 diagnostics (KalmanFilter6 层亦防御)。
-///   E. 非有限值 Detection 直接丢弃并计数, 不进滤波器; 全程不抛异常。
-///
-/// 线程安全: **非线程安全**, 单线程持有 (fusion_node 内部调用)。
-/// 单位约定: 位置 m, 速度 m/s, 时间 s; 方差参数按**方差**解释, 不是标准差。
-/// ═══════════════════════════════════════════════════════════════════════════
+#include <Eigen/Dense>
 
-#include <cstddef>
+#include <array>
 #include <cstdint>
-#include <deque>
-#include <utility>   // std::pair (MatchIndex::by_track_id_)
 #include <vector>
-
-#include <Eigen/Core>
 
 namespace br_perception {
 namespace fusion {
 
-// ═══════════════════════════════════════════════════════════════════════════
-// 基础类型
-// ═══════════════════════════════════════════════════════════════════════════
-
-using Point3 = Eigen::Vector3d;
-
-/// @brief 追踪目标类别。前四档逐字对应 msg/Obstacle.msg 的 type 字段 (0-3)。
-enum class TrackCategory : std::uint8_t {
-  UNKNOWN = 0,
-  ENEMY_ROBOT = 1,
-  DROPPED_BLOCK = 2,
-  OTHER = 3,
-  BUILDING_SPOT_TOP = 4,   ///< 建筑位顶部目标 —— 走 keep_on_spot_frames 例外
-  MUSTIKA = 5,             ///< 穆斯蒂卡 —— clear_mobile_tracks 时保留
-};
-
-enum class DetectionSource : std::uint8_t {
-  LIDAR = 0,
-  CAMERA = 1,
-  FUSION = 2,
-};
-
-enum class TrackState : std::uint8_t {
-  CANDIDATE = 0,   ///< 观测 1 帧, 不输出, 等待确认
-  CONFIRMED = 1,   ///< 连续观测 ≥ confirm_frame_count, **输出给下游**
-  LOST = 2,        ///< 丢失中; 达 delete_frame_count 帧后删除
-};
-
-/// @brief 单个观测 (一帧里的一条 3D 检测结果)。由调用方构造。
-struct Detection {
-  Point3 position = Point3::Zero();          ///< world 系 3D 位置 (m)
-  TrackCategory category = TrackCategory::UNKNOWN;
-  DetectionSource source = DetectionSource::LIDAR;
-  float confidence = 0.0F;                   ///< [0, 1]
-  double stamp_sec = 0.0;                    ///< 采集时刻 (s)
-  bool is_held = false;                      ///< v1.3: 被 BR 持握
-};
-
-/// @brief 一条关联结果 (模块 19 的输出)。
-struct Match {
-  std::size_t detection_index = 0;   ///< 指向传入 applyDetections() 的 detections 下标
-  std::uint32_t track_id = 0;
-};
-
-// ═══════════════════════════════════════════════════════════════════════════
-// 6 状态卡尔曼滤波器 [x, y, z, vx, vy, vz] (恒速模型)
-// ═══════════════════════════════════════════════════════════════════════════
-
-class KalmanFilter6 {
+/**
+ * @brief 多目标追踪：6 态恒速卡尔曼 + CANDIDATE/CONFIRMED/LOST 状态机（模块 18）
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * ⚠️ **本模块是纯 C++ 库，不是节点**（与 19 `target_associator` 同款理由）
+ *
+ * 规格 §4.2 末行写着「发布 `/perception/tracks` 和 `/perception/tracks/markers`」——
+ * **这两个发布归模块 21 `fusion_node`**。理由：21 是融合层唯一的节点
+ * （你 2026-09-25 拍板「fusion_node 只发融合结果，pipeline 保有上行权」），
+ * 由它统一发布，避免再多一个节点发同一批数据。**这是一处有意的偏差，记在 §八。**
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * ⚠️⚠️ **本模块的"正确"极难从输出看出来** —— 这是它必须有单测的原因
+ *
+ * 卡尔曼滤波错了**不会报错**：增益算错、噪声矩阵量纲错、dt 用错，
+ * 症状全是"**看起来在跟，但跟得不对**"——残差偏大、滞后、或者干脆不收敛。
+ * 而这些在 RViz 里**都是一条平滑的轨迹**，肉眼分不出对错。
+ * ⇒ 单测里最值钱的是那几条**能用闭式解手算**的：恒速运动必须零残差、静止目标速度必须收敛到 0。
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * 状态机（§4.2 原文）
+ * ```
+ *   CANDIDATE: 连续观测到 1 帧       → **不输出给下游**（等确认，防单帧噪声）
+ *   CONFIRMED: 连续命中 confirm_frame_count 帧 → 确认，输出
+ *   LOST:      连续丢失 delete_frame_count 帧  → 删除
+ * ```
+ * ⚠️ `hit_count` / `miss_count` 是**状态机的唯一判据原料** ——
+ *    别拿"距上次观测多久"之类去凑（那会把帧数判据变成时间判据，
+ *    而帧率一变语义就变了）。
+ *
+ * ⚠️ **「v1.2」建筑位顶部目标（天空方块）不受 LOST 删除约束**：
+ *    它们的位置是**场地常量**，且"被翻走"是高频事件（规则 3.5.6-3.5.8）——
+ *    按 LOST 删掉再重建，会让**归属在重建窗口里丢失**，而那正是 40/80 分的判据。
+ *    ⇒ 标了 `on_known_spot` 的 track，在 LOST 后仍保留 `keep_on_spot_frames` 帧。
+ */
+class KalmanTracker
+{
 public:
-  static constexpr int kStateDim = 6;
-  static constexpr int kMeasDim = 3;
+  // ══════════════════════════════════════════════════════════════════════
+  // 状态标记（与 `msg/Track.msg` 的 S_* 逐字对应）
+  // ══════════════════════════════════════════════════════════════════════
+  enum State : std::uint8_t {
+    kCandidate = 0,
+    kConfirmed = 1,
+    kLost      = 2,
+  };
 
-  /// @brief 用首个观测初始化: 位置 = 观测, 速度 = 0, 协方差 = 给定初值
-  [[nodiscard]] static KalmanFilter6 initialize(const Point3& position,
-                                                double position_var,
-                                                double velocity_var) noexcept;
+  using Vec6 = Eigen::Matrix<double, 6, 1>;
+  using Mat6 = Eigen::Matrix<double, 6, 6>;
 
-  /// @brief 预测: x ← F x, P ← F P Fᵀ + Q。
+  struct Params
+  {
+    /// 预测步的 dt 上限（s）。⚠️ 超过它 ⇒ 该 track 的预测不可信 ⇒ 删除。
+    /// ⚠️ 这是**时间**判据，与 `delete_frame_count`（**帧数**判据）是**两把不同的闸**：
+    ///    帧闸防"连续丢帧"，时间闸防"帧率掉到 1fps 时它还在算五分钟前的预测"。
+    double max_prediction_age_sec{0.5};
+    /// 连续命中多少帧升 CONFIRMED（§4.2 的 `confirm_frame_count`）
+    int confirm_frame_count{3};
+    /// 连续丢失多少帧删（§4.2 的 `delete_frame_count`）
+    int delete_frame_count{5};
+    /// 「v1.2」`on_known_spot` 的 track 在 LOST 后**再多留**多少帧
+    int keep_on_spot_frames{30};
+
+    // ── 滤波器参数 ──
+    /// 加速度过程噪声标准差 σa (m/s²)：**不是**"实际加速度"，是"模型允许它多不听话"。
+    /// ⚠️ 调大的效果是"更信观测、跟得快但抖"；调小则"更信模型、平滑但滞后"。
+    double sigma_a{2.0};
+    /// 观测噪声标准差 σz (m)：雷达聚类的位置精度量级。
+    double sigma_z{0.05};
+
+    // ── 「v1.2」推移检测 ──
+    /// 判定"z 基本恒定"的容差 (m)：整个窗口内 z 的**峰峰值**小于它才算"没被抬起"
+    double pushing_z_tol_m{0.05};
+    /// 至少要有这么多采样才敢判定（样本太少不下结论）
+    int pushing_min_samples{8};
+    /// 推移判定还要"确实在水平动"：窗口首尾的**水平位移**超过它 (m) 才算
+    /// ⚠️ 没有它的话，一个**静止**目标（z 恒定、水平也不动）会被判成推移 ——
+    ///    那是最糟的误判（静止 ≠ 被推）。
+    double pushing_min_horiz_m{0.05};
+
+    /// 速度小于它 ⇒ 认为静止（m/s）。用于"静止目标速度必须收敛到 0"那条判据。
+    double still_speed_eps{0.05};
+  };
+
+  /// 一个候选/已确认目标
+  struct Track
+  {
+    std::uint32_t id{0};
+    std::uint8_t  state{kCandidate};
+    std::uint8_t  type{0};            ///< 沿用 `Obstacle.msg` 的 ObstacleType
+    std::uint8_t  last_update_src{0}; ///< 见 `Track.msg` 的 SRC_*
+    float         confidence{0.0f};
+
+    /// 「v1.2」位置在**已知建筑位顶部** ⇒ 不按 LOST 删（见类注释）
+    bool on_known_spot{false};
+    /// 「v1.3」持握：高置信度视觉但无雷达点位匹配 ⇒ 不丢弃、不强融合
+    bool is_held{false};
+    /// 「v1.2」己方 TR 候选（由 19 置位）
+    bool is_ally_tr{false};
+    /// 「v1.2」推移轨迹（见 `is_pushing`）
+    bool suspected_pushing{false};
+
+    std::uint32_t hit_count{0};       ///< 累计命中（**状态机判据原料**）
+    std::uint32_t miss_count{0};      ///< **连续**丢失（同上；命中时清 0）
+    double        last_seen_sec{0.0}; ///< 最后一次**被观测到**的时刻
+
+    Vec6 kf_state{Vec6::Zero()};
+    Mat6 kf_cov{Mat6::Identity()};
+
+    /// 历史轨迹（诊断与推移检测用）。⚠️ 有上限（见 `history_max`），**不会无限长**。
+    struct Sample { double t, x, y, z; };
+    std::vector<Sample> history;
+  };
+
+  /// 历史轨迹保留上限。⚠️ 无限增长 = 长时间比赛下的**内存泄漏式**退化。
+  static constexpr std::size_t history_max = 200;
+
+  // ══════════════════════════════════════════════════════════════════════
+  // 滤波器（**static 纯函数** —— 单测直接喂）
+  // ══════════════════════════════════════════════════════════════════════
+
+  /// @brief 恒速模型的状态转移矩阵 `F = [[I, dt·I], [0, I]]`
+  [[nodiscard]] static Mat6 transition(double dt);
+
+  /// @brief 过程噪声 `Q`（恒速模型的**连续白噪声加速度**离散化）
+  /// ```
+  ///   Q = σa² · [[dt⁴/4·I, dt³/2·I],
+  ///              [dt³/2·I, dt²·I  ]]
+  /// ```
+  /// ⚠️ **量纲必须对**：位置块是 dt⁴、速度块是 dt²、交叉项是 dt³。
+  ///    写成 dt²/dt/dt 那种"看着差不多"的版本**不会报错**，只会让滤波器**悄悄失谐**。
+  [[nodiscard]] static Mat6 process_noise(double dt, double sigma_a);
+
+  /// @brief 观测矩阵 `H = [I₃ | 0₃]` —— **只观测位置，不观测速度**
+  [[nodiscard]] static Eigen::Matrix<double, 3, 6> observation();
+
+  /// @brief 观测噪声 `R = σz²·I₃`
+  [[nodiscard]] static Eigen::Matrix3d measurement_noise(double sigma_z);
+
+  /// @brief 预测步：`x ← Fx`、`P ← FPFᵀ + Q`
+  static void predict(Vec6& x, Mat6& P, double dt, const Params& params);
+
+  /// @brief 更新步：标准卡尔曼增益更新（只测位置）
+  /// ⚠️ 用 **Joseph 形式**不必要（6 维、数值条件好），但**别省掉对称化** ——
+  ///    浮点误差会让 P 慢慢失去对称性，久了 S 求逆出 NaN。
+  static void update(Vec6& x, Mat6& P,
+                     double mx, double my, double mz,
+                     const Params& params);
+
+  // ══════════════════════════════════════════════════════════════════════
+  // 状态机（**static 纯函数**）
+  // ══════════════════════════════════════════════════════════════════════
+
+  /// @brief 一步状态机推进
+  /// @param cur         当前状态
+  /// @param hit         本帧是否被观测到
+  /// @param hit_count   推进后的累计命中数（调用方先自增）
+  /// @param miss_count  推进后的**连续**丢失数（本帧命中时应为 0）
+  /// @param age_sec     距上次被观测到的时长
+  /// @param params      参数
+  /// @return 推进后的状态；调用方据 `is_dead()` 决定是否删除
   ///
-  /// 实现优化: Q 为对角阵, 不求整矩阵 —— 直接 `P.diagonal() += process_noise`。
-  /// **dt ≤ 0 时直接返回 (防御性, 调用方仍应按判定 D 计数 diagnostics)。**
-  void predict(double dt_sec,
-               const Eigen::Matrix<double, 6, 1>& process_noise) noexcept;
+  /// ⚠️ **`age_sec` 的单位是「秒」，且必须是同一单调时钟的差值**（`now − last_seen_sec`）。
+  ///    **函数内防不住单位错** —— 把毫秒当秒传进来会**静默**让时间闸早触发 1000 倍，
+  ///    症状是"目标一丢失就被删"。调用方钉死这条约定。
+  ///
+  /// ⚠️ 本函数**不看** `on_known_spot`（原签名里有这个参数，2026-09-25 按代码复核意见删掉了）——
+  ///    "丢了没丢"是**事实**，"要不要因此删掉它"是**策略**（在 `is_dead()` 里）。
+  ///    ⚠️ 留一个**用不到的参数**会让调用方误以为它影响状态机 —— 那是"注释在撒谎"的另一种形式。
+  [[nodiscard]] static std::uint8_t step_state(std::uint8_t cur, bool hit,
+                                               std::uint32_t hit_count,
+                                               std::uint32_t miss_count,
+                                               double age_sec,
+                                               const Params& params);
 
-  /// @brief 标准卡尔曼更新 (3 维位置观测, 各向同性量测方差)。
-  /// @param measurement_var 量测**方差** (m²)。必须 > 0 —— 传 ≤ 0 视为脏数据直接忽略。
-  void update(const Point3& measured_position, double measurement_var);
+  /// @brief 该状态是否已到"该删除"
+  /// @param kept_on_spot_frames 已经在 LOST 上多留了多少帧（见 `keep_on_spot_frames`）
+  [[nodiscard]] static bool is_dead(std::uint8_t state, bool on_known_spot,
+                                    int kept_on_spot_frames,
+                                    const Params& params);
 
-  [[nodiscard]] Point3 position() const noexcept { return x_.head<3>(); }
-  [[nodiscard]] Point3 velocity() const noexcept { return x_.tail<3>(); }
+  // ══════════════════════════════════════════════════════════════════════
+  // 「v1.2」推移轨迹检测
+  // ══════════════════════════════════════════════════════════════════════
 
-  /// @brief 位置分量方差 (协方差对角前 3 项, 用于置信度换算)
-  [[nodiscard]] Point3 positionVariance() const noexcept {
-    return p_.diagonal().head<3>();
-  }
+  /// @brief 是否"疑似推移"：窗口内 **z 峰峰值 < 容差**（没被抬起放下）
+  ///        且 **水平位移足够大**（确实在动）。
+  ///
+  /// ⚠️ 为什么要这个判据：规则 3.5.3 / 8.6.4 里"**搬运**"与"**推移**"的待遇不同，
+  ///    而雷达只看得到轨迹。**抬起-放下**的轨迹在 z 上一定有跳变 ⇒ 这是雷达唯一能用的分界。
+  /// ⚠️ **样本不足时返回 false**（不下结论），不是"当成推移" ——
+  ///    宁可漏报也不能把搬运误判成推移。
+  ///
+  /// ⚠️⚠️ **判定窗口 = 传入的整个 `history`，本函数不做任何窗口截取。**
+  ///    "窗口内 z 恒定"里的**窗口由调用方决定**：传 `track.history`（= 最近 `history_max` 条）
+  ///    就是"最近 200 帧"，只传尾部若干条就是更短的窗。
+  ///    ⇒ **判定精度直接取决于这个选择**，所以它是**调用方的契约**，不是本函数的内部细节。
+  ///    （原注释只写"窗口内"，没说清是整个 history 还是最近 N 帧 —— 已按代码复核意见写明。）
+  /// ⚠️ 边界是**非严格**：`z 峰峰值 == pushing_z_tol_m` **算通过**（不超）、
+  ///    水平位移 `== pushing_min_horiz_m` **不算通过**（要求严格大于）。两条都有用例钉住。
+  [[nodiscard]] static bool is_pushing(const std::vector<Track::Sample>& history,
+                                       const Params& params);
 
-  [[nodiscard]] const Eigen::Matrix<double, 6, 1>& state() const noexcept { return x_; }
-  [[nodiscard]] const Eigen::Matrix<double, 6, 6>& covariance() const noexcept { return p_; }
+  // ══════════════════════════════════════════════════════════════════════
+  // 管理（**非 static，但不碰 ROS** —— 纯数据管理，仍可单测）
+  // ══════════════════════════════════════════════════════════════════════
+
+  /// @brief 新建一个候选 track 并用观测初始化（速度先给 0，由后续帧估出来）
+  /// @return **新 track 的 id**（**不是引用**）
+  ///
+  /// ⚠️⚠️ **为什么返回 id 而不是 `Track&`**（2026-09-25 代码复核抓出）：
+  ///    底层是 `std::vector`，`push_back` 可能重新分配 ⇒ **上一次返回的引用会悬空**。
+  ///    而"连加两个 track 再回头用第一个"是**最自然的写法**：
+  ///    ```cpp
+  ///    auto& a = tr.add_track(...);   // ⚠️ 危险写法
+  ///    tr.add_track(...);             //    这行之后 a 已失效
+  ///    a.hit_count++;                 //    UB —— 而且多半不崩，只是数据悄悄错
+  ///    ```
+  ///    ⇒ 返回 id + `find(id)` 取用，**从接口上杜绝**这个坑。
+  ///    ⚠️ 当初的 `std::move(t)` 保留（`Track` 里有 `vector<Sample>`，move 省一次深拷贝）。
+  ///
+  /// ⚠️ 顺手**执行 `history_max`**（原实现只把上限写在注释里、代码没做 ⇒ 那是"注释在撒谎"）。
+  std::uint32_t add_track(double mx, double my, double mz, double t_sec,
+                          const Params& params);
+
+  /// @brief 建一个**已知位置的常驻 track**（建筑位 / 柱子 / 穆斯蒂卡柱）
+  ///
+  /// ⚠️⚠️ **为什么需要它**（2026-09-25 接线时发现的设计缺口）：
+  ///   模块 19 的 `KnownRegion::track_id` 要求指向一个**已存在的 track**，
+  ///   而普通 `add_track` 的 id 来自 `next_id_++`（跑着的计数器）
+  ///   ⇒ **建筑位编号与 track id 对不上** ⇒ 落区认领**一个也认不到**
+  ///     ⇒ 19 的"落区优先于就近"这条核心语义**整条失效**（塔归属会串位）。
+  ///
+  /// ⇒ 本函数让调用方**指定 id**（就用建筑位编号），并：
+  ///   · `on_known_spot = true`（⇒「v1.2」LOST 后仍保留，见 `keep_on_spot_frames`）
+  ///   · 状态直接置 **CONFIRMED**（它是**场地常量**，不需要靠观测去确认）
+  ///   · 速度给 0 且**速度协方差给小**（它不会动！与普通 track 的"给大"相反）
+  ///
+  /// ⚠️ 会把 `next_id_` 抬到 `id + 1` 之上，**避免之后的普通 track 撞号**。
+  /// ⚠️ 位置是**场地事实** ⇒ 调用方要传**配置里的常量坐标**，不要传滤波估计值。
+  Track& add_known_track(std::uint32_t id, double x, double y, double z,
+                         double t_sec, const Params& params);
+
+  /// @brief 按 id 找 track。**找不到返回 `nullptr`**（不抛、不造）。
+  /// ⚠️ 返回的指针同样**在下一次 `add_track` 之后可能失效** —— 别跨调用持有。
+  [[nodiscard]] Track* find(std::uint32_t id);
+  [[nodiscard]] const Track* find(std::uint32_t id) const;
+
+  /// @brief 追加一条历史采样，**并执行 `history_max` 上限**。
+  ///
+  /// ⚠️ 调用方**必须走这个函数**往 `Track::history` 里加 —— 直接 `push_back` 会绕过上限，
+  ///    而"上限只活在注释里"正是 2026-09-25 复核抓出的问题（长时间比赛 + 高帧率 ⇒ 内存单调涨）。
+  void push_history(Track& track, const Track::Sample& sample);
+
+  /// 🆕「v1.6」清空**移动目标** track，保留建筑位顶部目标与穆斯蒂卡（规则 5.3.2：已放置物体保持原位）
+  /// @param keep_types  要保留的 `type` 列表（穆斯蒂卡等）
+  /// @return 被清掉的条数
+  std::size_t clear_mobile_tracks(const std::vector<std::uint8_t>& keep_types);
+
+  /// 🆕「v1.6」当前 `is_held == true` 的 track 数（终场告警 / 持握超限判定用）
+  [[nodiscard]] std::size_t held_object_count() const;
+
+  [[nodiscard]] const std::vector<Track>& tracks() const { return tracks_; }
+  [[nodiscard]] std::vector<Track>& tracks() { return tracks_; }
+
+  /// 下一个可用的 id（单调递增，**不复用** —— 复用会让下游把新旧目标混为一谈）
+  [[nodiscard]] std::uint32_t next_id() const { return next_id_; }
 
 private:
-  Eigen::Matrix<double, 6, 1> x_ = Eigen::Matrix<double, 6, 1>::Zero();
-  Eigen::Matrix<double, 6, 6> p_ = Eigen::Matrix<double, 6, 6>::Identity();
-};
-
-// ═══════════════════════════════════════════════════════════════════════════
-// 追踪目标
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// @brief 一个追踪目标。⚠ 体积较大 (6×6 协方差 + 历史 deque),
-///        **避免按值拷贝**, 优先用 confirmedTrackRefs() 的指针视图访问。
-struct Track {
-  std::uint32_t id = 0;
-  TrackState state = TrackState::CANDIDATE;
-  TrackCategory category = TrackCategory::UNKNOWN;
-  float confidence = 0.0F;
-
-  KalmanFilter6 filter;
-  std::deque<Point3> history;          ///< 历史轨迹 (最新在尾), 上限 kMaxHistory
-
-  std::uint32_t hit_streak = 0;
-  std::uint32_t miss_streak = 0;
-  double last_seen_sec = 0.0;          ///< 最后一次被观测时刻 (s) —— 判定 A / B 都用它
-
-  bool is_held = false;                ///< v1.3
-  bool suspected_pushing = false;      ///< v1.2
-
-  static constexpr std::size_t kMaxHistory = 60;
-};
-
-// ═══════════════════════════════════════════════════════════════════════════
-// 参数 (⚠ 字段名与 config/fusion_params.yaml 的键名**逐字一致**)
-// ═══════════════════════════════════════════════════════════════════════════
-//
-/// yaml 键名对应 (改一处必须改另一处):
-///   kalman.process_noise / kalman.measurement_noise_lidar /
-///   kalman.measurement_noise_camera / kalman.max_prediction_age /
-///   confirm_frame_count / delete_frame_count (这两个是 ros__parameters 直接子键) /
-///   tracking.keep_on_spot_frames / tracking.push_detect_window_ms
-struct TrackerParams {
-  Eigen::Matrix<double, 6, 1> process_noise =
-      (Eigen::Matrix<double, 6, 1>() << 0.05, 0.05, 0.05, 0.10, 0.10, 0.10).finished();
-
-  double measurement_noise_lidar = 0.01;    ///< 雷达量测方差 (m²)
-  double measurement_noise_camera = 0.05;   ///< 相机量测方差 (m²)
-  double max_prediction_age = 1.0;          ///< 最大预测时长 (s), 超出删除
-
-  std::uint32_t confirm_frame_count = 3;
-  std::uint32_t delete_frame_count = 2;
-
-  std::uint32_t keep_on_spot_frames = 300;  ///< 建筑位顶部目标丢失后强制保持帧数
-  double push_detect_window_ms = 1000.0;    ///< 推移检测滑动窗口 (ms)
-
-  // 下列三个是**本文件新增的常量**, 任务书与 yaml 都没有 (判定值, 可调)
-  double initial_position_var = 0.25;   ///< 新建 track 位置初方差 (m², σ=0.5m)
-  double initial_velocity_var = 4.0;    ///< 新建 track 速度初方差 (m²/s², σ=2m/s)
-  double push_max_height_var = 0.04;    ///< 推移判定: 窗口内 z 方差上限 (m², σ=0.2m)
-};
-
-// ═══════════════════════════════════════════════════════════════════════════
-// 诊断 (§7 风格: 计数器, 不抛异常)
-// ═══════════════════════════════════════════════════════════════════════════
-
-struct TrackerDiagnostics {
-  std::uint64_t frames = 0;
-  std::uint64_t created = 0;
-  std::uint64_t confirmed = 0;           ///< CANDIDATE → CONFIRMED 累计次数
-  std::uint64_t deleted_age = 0;
-  std::uint64_t deleted_miss = 0;
-  std::uint64_t kept_on_spot = 0;
-  std::uint64_t dropped_non_finite = 0;  ///< 判定 E
-  std::uint64_t skipped_dt = 0;          ///< 判定 D
-  std::uint64_t pushing_flagged = 0;
-};
-
-// ═══════════════════════════════════════════════════════════════════════════
-// 匹配索引 (本轮新增): 把 vector<Match> 转成 O(1) 查找结构。**由
-// applyDetections() 在单帧内构造一次**, 命中更新与建新目标共用同一份,
-// 摊掉平方级扫描。
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// @brief Match 的查找索引。一次构建, 多次查询。
-///
-///   detectionMatched(i)  → detection i 是否已被某 track 命中 (建新目标用)
-///   matchForTrack(id)    → track id 对应 Match 的下标 (命中更新用)
-///
-/// 公开而非藏在 .cpp 里, 是为了**能脱离 Tracker 单独单测** (只有查找表语义, 无状态机)。
-///
-/// ⚠ 本结构不拥有数据, 生命周期内必须保证 detections / matches 不被修改。
-class MatchIndex {
-public:
-  /// @param num_detections 本帧 detection 总数
-  /// @param matches        模块 19 输出的关联结果 (需先按 track_id 去重校验,
-  ///                       同一 track 出现多条时保留第一条)
-  MatchIndex(std::size_t num_detections, const std::vector<Match>& matches);
-
-  [[nodiscard]] bool detectionMatched(std::size_t detection_index) const noexcept;
-  /// @return 命中的 Match 下标; 未命中返回 npos
-  [[nodiscard]] std::size_t matchForTrack(std::uint32_t track_id) const noexcept;
-
-  static constexpr std::size_t npos = static_cast<std::size_t>(-1);
-
-private:
-  std::vector<std::uint8_t> det_matched_;      ///< 每 detection 是否被命中
-  std::vector<std::pair<std::uint32_t, std::size_t>> by_track_id_;  ///< 已按 id 排序
-};
-
-// ═══════════════════════════════════════════════════════════════════════════
-// 追踪器
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// @brief 多目标追踪器。调用顺序 (每帧):
-///
-///     tracker.predictAll(stamp_sec);                                    // 1
-///     auto matches = associator.associate(dets, tracker.allTracks());   // 2 模块 19
-///     tracker.applyDetections(dets, matches);                           // 3 更新命中 + 建新目标
-///     for (const Track* t : tracker.confirmedTrackRefs()) { ... }       // 4 零拷贝输出
-class KalmanTracker {
-public:
-  explicit KalmanTracker(const TrackerParams& params = TrackerParams());
-
-  // ── 每帧调用 ──
-
-  /// @brief 步骤 1: 全部 track 预测到 stamp_sec, 按判定 A 剪枝, 刷新推移标记。
-  void predictAll(double stamp_sec);
-
-  /// @brief 步骤 3: **更新命中的 + 把未命中的建成新目标**, 一次调用做完。
-  ///
-  /// 两个动作合并成一个入口, 是为了让 MatchIndex **只建一次**在结构上成立
-  /// (拆成两个方法就只能各建一次索引, 优化目标落空), 不靠调用方自觉。
-  ///
-  /// - 命中的 Detection → 更新对应 track (状态机迁移 + 滤波器更新 + 历史)
-  /// - 未命中的 Detection → 建成新 track (CANDIDATE)
-  /// - 非有限值 Detection → 丢弃并计数 (判定 E); 其命中的 track 按**未命中**处理
-  ///   (miss_streak +1, 状态机照常向 LOST 迁移)
-  void applyDetections(const std::vector<Detection>& detections,
-                       const std::vector<Match>& matches);
-
-  // ── v1.6 ──
-
-  /// @brief 重试时清空移动目标 track, 保留 keep_categories 里的。
-  void clearMobileTracks(const std::vector<TrackCategory>& keep_categories);
-
-  /// @brief v1.6: 当前 is_held == true 的 track 数
-  [[nodiscard]] std::size_t heldObjectCount() const noexcept;
-
-  // ── 查询 ──
-
-  /// @brief **推荐**: CONFIRMED 轨迹的零拷贝视图 (const Track*, 指向内部存储)。
-  ///        生命周期内不得调用 predictAll/applyDetections/reset/clearMobileTracks。
-  [[nodiscard]] std::vector<const Track*> confirmedTrackRefs() const;
-
-  /// @brief CONFIRMED 轨迹副本 —— 兼容旧调用方。**每帧深拷贝, 优先用
-  ///        confirmedTrackRefs()**。仅当需要跨帧持有数据时使用本接口。
-  [[nodiscard]] std::vector<Track> confirmedTracks() const;
-
-  /// @brief 全部 track (含 CANDIDATE / LOST), 供模块 19 关联与可视化
-  [[nodiscard]] const std::vector<Track>& allTracks() const noexcept { return tracks_; }
-
-  [[nodiscard]] const TrackerDiagnostics& diagnostics() const noexcept { return diag_; }
-
-  /// @brief 清空全部 track 与诊断 (BR_RESET)。参数保留。
-  void reset() noexcept;
-
-private:
-  bool exemptFromDeletion(const Track& t, double now_sec) const noexcept;
-  void detectPushing(Track& t) const;
-  void applyMeasurement(Track& t, const Detection& det);
-
-  TrackerParams params_;
   std::vector<Track> tracks_;
-  TrackerDiagnostics diag_;
-  std::uint32_t next_id_ = 1;   ///< 从 1 开始; 0 保留为"无效 id"
+  std::uint32_t next_id_{1};   ///< ⚠️ 从 1 起：0 留给"无效 id"
 };
 
 }  // namespace fusion

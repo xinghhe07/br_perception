@@ -23,7 +23,7 @@ D435i 是**可选**的（默认不起）—— 它在本层只承担**深度**�
 
 前置:
   source /opt/ros/humble/setup.bash
-  source ~/ws_livox/install/setup.bash          # 相机层用不到, 但整个包的 CMake 需要它
+  source ~/point_ws/install/setup.bash          # 相机层用不到, 但整个包的 CMake 需要它
   source ~/br_perception/install/setup.bash
 
 用法:
@@ -65,6 +65,9 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import ComposableNodeContainer, Node
 from launch_ros.descriptions import ComposableNode
+# ⚠️ 2026-09-25 新增：**double 数组参数必须显式标类型** —— 见 `_sim_intrinsics_params()`。
+from launch_ros.parameter_descriptions import ParameterValue
+from rcl_interfaces.msg import ParameterType
 
 
 def _resolve_launch(share_dir, launch_file):
@@ -108,8 +111,10 @@ NODE_SPECS = [
     # ⚠️ 2026-09-23 新增（模块 9）。**用颜色** ⇒ uses_color=True，
     #    launch 会把 color_yaml_path 覆盖成 install 空间的**绝对路径**
     #    （`camera_params.yaml` 里写的是相对 $PWD 的字符串，不覆盖就找不到阈值文件）。
-    #    ⚠️ 它**只做判色、不做检测**：得分场景的 ROI 应来自雷达建筑位投影（**尚未实现**），
-    #       现在靠 `debug_roi_ratio` 手动指一个区域才能出结果 —— 见它在 camera_params.yaml 的块。
+    #    ⚠️ 它**只做判色、不做检测**：得分场景的 ROI 走**雷达建筑位投影**
+    #       （2026-09-24 落地）—— 但那条路要求 launch 额外给两样东西，本函数已按需补上：
+    #         · `field_geometry.yaml`（建筑位坐标/平台高）
+    #         · `sim_camera:=true` 时的**仿真相机内参**（实机内参是待标定的占位值）
     ('sky_block_detector',      'br_perception::camera::SkyBlockDetector',         'sky_block_detector',     True),
     ('camera_depth',            'br_perception::camera::CameraDepthNode',          'camera_depth',           False),
     ('camera_perception',       'br_perception::camera::CameraPerceptionNode',     'camera_perception_node', False),
@@ -150,11 +155,83 @@ def generate_launch_description():
         'use_sim_time', default_value='false', choices=['true', 'false'],
         description='用仿真时钟（接 gazebo/bag 回放时设 true）')
 
+    # ⚠️⚠️ `sim_camera` 与 `use_sim_time` **是两件事**，别合并成一个开关：
+    #    · `use_sim_time` = 时间戳来源（bag 回放也要开）
+    #    · `sim_camera`   = **图像来自 Gazebo 那台 640×384 的虚拟相机** ⇒ 内参要按
+    #      SDF 的 `<horizontal_fov>` 覆盖（实机是 1280×720 + 待标定内参）
+    #    合并的话，"回放实拍 bag"会被当成仿真而套上错的内参 —— 而**投影错**这件事
+    #    在看图像时完全看不出来（框照样画在画面上）。
+    sim_camera_arg = DeclareLaunchArgument(
+        'sim_camera', default_value='false', choices=['true', 'false'],
+        description='图像来自 Gazebo 虚拟相机 ⇒ 用 SDF 的 hfov 覆盖内参 + 戴上 '
+                    'field_geometry.yaml（建筑位坐标）。⚠️ 接实机/回放实拍时必须 false')
+    # ⚠️ **这里刻意不取 `sim_camera = LaunchConfiguration(...)`**（2026-09-25 删）。
+    #    取了它就会有人写成 `if sim_camera:` —— 而那**恒为真**（见 `make_params` 的 ⚠️），
+    #    后果是"仿真内参被无条件用到实机上"且 launch 直接崩。
+    #    正确读法只有一种：在 `_build_camera_layer(context)` 里
+    #    `context.launch_configurations.get('sim_camera', ...)`（执行期，拿到的是字符串）。
+
     intra = LaunchConfiguration('intra_process')
     use_sim = LaunchConfiguration('use_sim_time')
 
-    def make_params(uses_color):
-        """一个节点的参数列表。⚠️ 顺序有意义: 后面的**覆盖**前面的。"""
+    # ═══════════════════════════════════════════════════════════════════════════
+    # 仿真相机内参 —— ⚠️ **数值由 SDF 推导, 不是抄的**, 推导过程留在这里
+    # ═══════════════════════════════════════════════════════════════════════════
+    #   `models/fishbot/model.sdf`（仓库里那份在 scripts/out/gazebo/ 下）：
+    #     cam_wide_s: <horizontal_fov>1.1</horizontal_fov>  <image>640×384
+    #     cam_tele_s: <horizontal_fov>0.40</horizontal_fov> <image>640×384
+    #   Gazebo 的相机模型：fx = fy = (宽/2) / tan(hfov/2), cx = 宽/2, cy = 高/2
+    #     wide: 320 / tan(0.55) = 521.9     tele: 320 / tan(0.20) = 1578.6
+    #   ⚠️ 宽高比 640/384 ≠ 16:9（Gazebo 用 hfov 定 x 方向，y 由像素比推）
+    #      ⇒ **别拿"1280×720 的内参除 2"** 去凑（那套的视场是实机镜头的, 不是这台仿真相机的）。
+    #   ⚠️ 改 SDF 的 fov 或分辨率 ⇒ **这两个数组要一起重算**。
+    SIM_INTRINSICS = {
+        'fx': [521.9, 1578.6], 'fy': [521.9, 1578.6],
+        'cx': [320.0, 320.0],  'cy': [192.0, 192.0],
+        # letterbox **之前**那张图的尺寸（= 仿真相机分辨率）
+        'orig_w': 640, 'orig_h': 384,
+    }
+    # 建筑位坐标 / 平台高 / 塔高 / 方块边长 —— **事实源是 field_geometry.yaml 第 11 节**
+    # （与 `lidar_perception_node` 读的是同一组键；那份文件的参数块是 `/**` 通配,
+    #  所以传给任何节点都能匹配上）。
+    field_geometry = os.path.join(pkg_share, 'config', 'field_geometry.yaml')
+
+    def _sim_intrinsics_params():
+        """仿真相机内参 → 可直接交给节点的参数字典。
+
+        ⚠️⚠️ **float 数组必须包 `ParameterValue` 并显式标 `DOUBLE_ARRAY`（2026-09-25 修）。**
+        直接传 Python 的 `[521.9, 1578.6]` 会被 launch 当成**替换列表**去解析
+        （`normalize_to_list_of_substitutions` 只认 str / Substitution）⇒ 抛
+            `TypeError: Failed to normalize given item of type '<class 'float'>'`
+        ⇒ **整个 launch 起不来**。int 的 `orig_w` / `orig_h` 不需要包（它们是标量，
+        走的是另一条分支）—— 原注释说"包了会变成字符串"对**标量**成立，对**数组**不成立。
+        """
+        return {
+            'fx': ParameterValue(SIM_INTRINSICS['fx'],
+                                 value_type=ParameterType.PARAMETER_DOUBLE_ARRAY),
+            'fy': ParameterValue(SIM_INTRINSICS['fy'],
+                                 value_type=ParameterType.PARAMETER_DOUBLE_ARRAY),
+            'cx': ParameterValue(SIM_INTRINSICS['cx'],
+                                 value_type=ParameterType.PARAMETER_DOUBLE_ARRAY),
+            'cy': ParameterValue(SIM_INTRINSICS['cy'],
+                                 value_type=ParameterType.PARAMETER_DOUBLE_ARRAY),
+            # letterbox **之前**那张图的尺寸（= 仿真相机分辨率）
+            'orig_w': SIM_INTRINSICS['orig_w'],
+            'orig_h': SIM_INTRINSICS['orig_h'],
+        }
+
+    def make_params(name, uses_color, sim_camera_on):
+        """一个节点的参数列表。⚠️ 顺序有意义: 后面的**覆盖**前面的。
+
+        ⚠️ `sim_camera_on` 是**已求值的 bool**，不是 `LaunchConfiguration` ——
+           必须在 `OpaqueFunction` 里用 `context.launch_configurations` 取。
+           原实现写的是 `if sim_camera:`，而 `sim_camera` 是 `LaunchConfiguration`
+           对象 ⇒ **恒为真**（Python 里没有 `__bool__` 的对象都是真）⇒
+           **仿真相机内参被无条件写进 sky_block_detector**。
+           后果不是崩溃而是**静默错参**：接实机跑时用的还是 Gazebo 那台
+           640×384 / fx=521.9 的内参，投影出来的 ROI 全错 ——
+           而那正是 40/80 分判色链的输入。见 §八。
+        """
         ps = [camera_params,
               # ⚠️ use_sim_time 不是节点自己的参数，但每个节点都得有一份，
               #    否则仿真下各节点时间戳不同源 —— 聚合薄壳的 stale_sec 全靠
@@ -162,6 +239,12 @@ def generate_launch_description():
               {'use_sim_time': use_sim}]
         if uses_color:
             ps.append({'color_yaml_path': color_yaml})
+        if name == 'sky_block_detector':
+            # ⚠️ 投影主路要**建筑位坐标**（在 field_geometry.yaml 里）——
+            #    漏传 ⇒ 三个数组为空 ⇒ 主路关闭（节点会 WARN 点名, 不会静默）
+            ps.append(field_geometry)
+            if sim_camera_on:
+                ps.append(_sim_intrinsics_params())
         return ps
 
     # ── 跑法一: 单容器（默认）──
@@ -174,52 +257,67 @@ def generate_launch_description():
     #    聚合薄壳的 SlotData 正是长期持有（存到下一帧来为止）。
     #    将来若改用 **loaned message**（零拷贝的更进一步），**跨回调持有是禁止的** ——
     #    那时聚合薄壳必须改成"组帧时拷贝"，不能存指针。
-    container = ComposableNodeContainer(
-        name='camera_layer_container',
-        namespace='',
-        package='rclcpp_components',
-        executable='component_container_mt',   # mt = 多线程执行器
-        # ⚠️ 用多线程的理由: **节点之间**并行 —— 三个检测器各跑各的 OpenCV，
-        #    深度走独立回调（camera_depth_node.hpp 的硬约束是"独立回调，
-        #    不阻塞主感知链"）。单线程会让它们互相排队，直接违反那条约束。
-        #    ⚠️ **但多线程 ≠ 节点内并行**: 同一节点里 wide/tele 两个回调默认同属
-        #       一个 MutuallyExclusive callback group，**仍然串行**。
-        #       若将来发现 image_preprocessor 的宽/长焦成了瓶颈，得在**节点内部**
-        #       加 callback group —— 换个容器执行器解决不了。
-        #    ⚠️ 检测器内部有 state_mutex_ / diag_mutex_，聚合薄壳有 slot_mutex_，
-        #       多线程下安全; **将来新增节点前先确认它也有锁**。
-        composable_node_descriptions=[
-            ComposableNode(
-                package='br_perception', plugin=plugin, name=name,
-                parameters=make_params(uses_color),
-                extra_arguments=[{'use_intra_process_comms': intra}])
-            for name, plugin, _exe, uses_color in NODE_SPECS
-        ],
-        output='screen',
-        parameters=[{'use_sim_time': use_sim}],
-    )
+    # ═══════════════════════════════════════════════════════════════════════════
+    # 节点构造搬到**执行期**（OpaqueFunction）—— 这不是风格选择，是必需：
+    #   `sim_camera` / `intra_process` 都是 `LaunchConfiguration`，
+    #   **生成期它们只是对象、不是值**。原实现在生成期写 `if sim_camera:`，
+    #   那**恒为真**（Python 里没定义 `__bool__` 的对象都判真）⇒
+    #   仿真相机内参被**无条件**塞进 sky_block_detector，且 **launch 直接崩**
+    #   （float 数组不能当字面量参数传 —— 见 `_sim_intrinsics_params`）。
+    #   ⇒ 两个症状、一个根因：**在生成期读了一个只有执行期才有值的量**。
+    # ⚠️ 两种跑法**节点、参数、名字完全相同**，只有部署拓扑不同：
+    #    这样在"隔离模式"里复现的问题，容器模式下也一定复现（反之亦然）。
+    # ═══════════════════════════════════════════════════════════════════════════
+    def _build_camera_layer(context):
+        def _flag(key, default):
+            return context.launch_configurations.get(key, default).lower() \
+                in ('true', '1', 'yes')
 
-    # ── 跑法二: 6 个独立进程 ──
-    # ⚠️ 这才是**真正的进程级隔离**：一个节点段错误只死自己，不带走整层。
-    #    （容器跑法下 6 个节点同进程，一个崩全崩 —— 这是取舍，不是 bug。）
-    #    代价: 节点之间的图像走 DDS 序列化/反序列化。
-    standalone_nodes = [
-        Node(package='br_perception', executable=exe, name=name,
-             output='screen', parameters=make_params(uses_color))
-        for name, _plugin, exe, uses_color in NODE_SPECS
-    ]
+        sim_camera_on = _flag('sim_camera', 'false')
+        want_standalone = not _flag('intra_process', 'true')
 
-    # ⚠️ 二选一在执行期完成（OpaqueFunction），不是在生成期 ——
-    #    intra_process 是 LaunchConfiguration，生成期还没求值。
-    #    ⚠️ 两种跑法**节点、参数、名字完全相同**，只有部署拓扑不同：
-    #       这样在"隔离模式"里复现的问题，容器模式下也一定复现（反之亦然）。
-    def _pick_topology(context):
-        if context.launch_configurations.get('intra_process', 'true').lower() \
-                in ('false', '0', 'no'):
-            return standalone_nodes
-        return [container]
+        if want_standalone:
+            # ── 跑法二: 6 个独立进程 ──
+            # ⚠️ 这才是**真正的进程级隔离**：一个节点段错误只死自己，不带走整层。
+            #    （容器跑法下 6 个节点同进程，一个崩全崩 —— 这是取舍，不是 bug。）
+            #    代价: 节点之间的图像走 DDS 序列化/反序列化。
+            return [
+                Node(package='br_perception', executable=exe, name=name,
+                     output='screen',
+                     parameters=make_params(name, uses_color, sim_camera_on))
+                for name, _plugin, exe, uses_color in NODE_SPECS
+            ]
 
-    topology = OpaqueFunction(function=_pick_topology)
+        # ── 跑法一: 单容器（默认）──
+        return [_build_container(sim_camera_on)]
+
+    def _build_container(sim_camera_on):
+        return ComposableNodeContainer(
+            name='camera_layer_container',
+            namespace='',
+            package='rclcpp_components',
+            executable='component_container_mt',   # mt = 多线程执行器
+            # ⚠️ 用多线程的理由: **节点之间**并行 —— 三个检测器各跑各的 OpenCV，
+            #    深度走独立回调（camera_depth_node.hpp 的硬约束是"独立回调，
+            #    不阻塞主感知链"）。单线程会让它们互相排队，直接违反那条约束。
+            #    ⚠️ **但多线程 ≠ 节点内并行**: 同一节点里 wide/tele 两个回调默认同属
+            #       一个 MutuallyExclusive callback group，**仍然串行**。
+            #       若将来发现 image_preprocessor 的宽/长焦成了瓶颈，得在**节点内部**
+            #       加 callback group —— 换个容器执行器解决不了。
+            #    ⚠️ 检测器内部有 state_mutex_ / diag_mutex_，聚合薄壳有 slot_mutex_，
+            #       多线程下安全; **将来新增节点前先确认它也有锁**。
+            composable_node_descriptions=[
+                ComposableNode(
+                    package='br_perception', plugin=plugin, name=name,
+                    parameters=make_params(name, uses_color, sim_camera_on),
+                    extra_arguments=[{'use_intra_process_comms': intra}])
+                for name, plugin, _exe, uses_color in NODE_SPECS
+            ],
+            output='screen',
+            parameters=[{'use_sim_time': use_sim}],
+        )
+
+    topology = OpaqueFunction(function=_build_camera_layer)
 
     # ⚠️ 用 OpaqueFunction 延迟解析: _include 内部要查包，而它在
     #    generate_launch_description() 阶段就执行 —— 早于 Condition 求值。
@@ -261,6 +359,7 @@ def generate_launch_description():
         rs_arg,
         perception_rviz_arg,
         sim_arg,
+        sim_camera_arg,
         LogInfo(msg="[br_perception] 相机层联调启动 — §10.4 (P0-6)"),
         LogInfo(msg="  期望话题: /perception/camera/frame  (聚合薄壳输出)"),
         LogInfo(msg="  ⚠️ 深度槽默认恒为 IDLE —— ROI 话题 /camera/depth/target_roi 无发布者，"

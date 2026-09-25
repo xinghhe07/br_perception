@@ -11,8 +11,16 @@
 #include <pcl/common/common.h>
 #include <pcl/common/centroid.h>
 #include <pcl/common/pca.h>
+#include <pcl/common/transforms.h>
 #include <pcl/features/normal_3d_omp.h>
 #include <pcl_conversions/pcl_conversions.h>
+
+// ⚠️ TF：把输入点云从雷达系搬到场地系（见头文件「坐标系纪律」那段）。
+//    ⚠️ 只用 `lookupTransform` + 自己组 `Eigen::Affine3f` —— **不需要 `tf2_geometry_msgs`**
+//       （那个包是为 `Buffer::transform<PointStamped>` 的重载准备的，这里不走那条路）。
+//       旋转直接用四元数构造，省一层转换、也少一个编译期依赖。
+#include <tf2/exceptions.h>
+#include <tf2/time.h>
 
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
@@ -38,10 +46,13 @@ namespace {
 
 const char* spot_status_name(BuildingSpotStatus s) {
   switch (s) {
+    case BuildingSpotStatus::EMPTY:          return "Empty";
     case BuildingSpotStatus::ONE_EARTH:      return "One Earth";
     case BuildingSpotStatus::TWO_EARTH:      return "Two Earth";
     case BuildingSpotStatus::COMPLETE_TOWER: return "Complete Tower";
-    default:                                  return "Empty";
+    // ⚠️ **不能落进 `default` 印成 "Empty"** —— 那正是"用 0 冒充未知"的同一个错。
+    case BuildingSpotStatus::UNKNOWN:        return "**UNKNOWN(没量成)**";
+    default:                                  return "??(未定义的 status)";
   }
 }
 
@@ -149,6 +160,17 @@ LidarPerceptionNode::LidarPerceptionNode(const rclcpp::NodeOptions& options)
   this->declare_parameter<double>("complete_tower_min", complete_tower_min_);
   this->declare_parameter<double>("complete_tower_max", complete_tower_max_);
 
+  // ── 坐标系（2026-09-24 新增）──
+  // ⚠️ 这两个键**必须与融合层的 `fusion_params.yaml` 一致**：名字对不上 = 查不到 TF
+  //    = 全帧 UNKNOWN（**不报错、只是什么都检测不到**，见头文件「坐标系纪律」）。
+  this->declare_parameter<std::string>("world_frame", world_frame_);
+  this->declare_parameter<double>("tf_timeout_sec", tf_timeout_sec_);
+
+  // ── 中间结果话题开关（2026-09-24 新增；语义见调用处那段）──
+  //   ⚠️ 与 `debug_enabled` **不是一回事**：那个管"给人看的东西"，
+  //      这个管"组件化拓扑的数据接口有没有人消费"。默认 **true**（发）。
+  this->declare_parameter<bool>("publish_intermediate_topics", publish_intermediate_topics_);
+
   // ── 调试 & 看门狗参数 ──
   this->declare_parameter<bool>("debug_enabled", debug_enabled_);
   this->declare_parameter<double>("watchdog_timeout", watchdog_timeout_);
@@ -156,6 +178,9 @@ LidarPerceptionNode::LidarPerceptionNode(const rclcpp::NodeOptions& options)
 
   // ── 读取参数 ──
   #define GET(n, v) this->get_parameter(n, v)
+  GET("world_frame", world_frame_);
+  GET("tf_timeout_sec", tf_timeout_sec_);
+  GET("publish_intermediate_topics", publish_intermediate_topics_);
   GET("leaf_size", leaf_size_);
   GET("enable_outlier_filter", enable_outlier_filter_);
   GET("outlier_mean_k", outlier_mean_k_);
@@ -253,6 +278,15 @@ LidarPerceptionNode::LidarPerceptionNode(const rclcpp::NodeOptions& options)
   param_cb_handle_ = this->add_on_set_parameters_callback(
     std::bind(&LidarPerceptionNode::on_param_change, this, std::placeholders::_1));
 
+  // ═══════════════════════════════════════════════════════════════════════
+  // TF：**只读**（把点云从雷达系搬到场地系；见头文件「坐标系纪律」）
+  // ⚠️ 用 `tf2_ros` 而不是 `fusion::CoordinateTransformer`：后者会让雷达层反向依赖
+  //    融合层，而且它构造时会**无条件广播** TF（多一个广播者就撞 `TF_REPEATED_DATA`）。
+  // ⚠️ 建在这里（订阅之前）—— 第一帧点云到达时监听器就已经在收 TF 了。
+  // ═══════════════════════════════════════════════════════════════════════
+  tf_buffer_   = std::make_unique<tf2_ros::Buffer>(this->get_clock());
+  tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+
   // ── 订阅: 原始雷达点云 ──
   // ⚠ QoS 必须 BEST_EFFORT: 仿真里这个话题由 Gazebo ray 插件直接发布 (BEST_EFFORT),
   //   RELIABLE 订阅者 ↔ BEST_EFFORT 发布者 = 不兼容, 静默收不到。best_effort 订阅
@@ -303,12 +337,29 @@ LidarPerceptionNode::LidarPerceptionNode(const rclcpp::NodeOptions& options)
     std::chrono::duration<double>(watchdog_timeout_),
     std::bind(&LidarPerceptionNode::radar_watchdog_timer_callback, this));
 
+  // ── 坐标系：**说在最显眼的地方**（它是"整个模块有没有在工作"的总开关）──
+  tf_timeout_sec_ = std::max(0.001, std::min(tf_timeout_sec_, 1.0));
+  if (world_frame_.empty()) {
+    // ⚠️ 空串 = 明确"不换系"。那时本模块在**车不在原点时恒报错值**（见头文件那段），
+    //    所以这条必须响 —— 它是配置错误，不是模式选择。
+    RCLCPP_WARN(this->get_logger(),
+      "**world_frame 为空 ⇒ 本节点不做坐标变换** —— 而本模块的常量"
+      "(l0/l1/l2_height、roi、building_spot_*) **全是场地系的值**。"
+      "后果: 地面分层全空 + 建筑位裁到空气 + 对外坐标与 frame_id 不符。"
+      "⚠️ 只有在「输入点云本来就在场地系」时才允许这么配。");
+  } else {
+    RCLCPP_INFO(this->get_logger(),
+      "坐标系: 点云将变换到 **%s**（TF 超时 %.3fs）。⚠️ 若该系无人广播"
+      "（`perception_pipeline` 未起），本节点会**全帧报 UNKNOWN**，且不报错。",
+      world_frame_.c_str(), tf_timeout_sec_);
+  }
+
   RCLCPP_INFO(this->get_logger(),
     "LidarPerceptionNode ready | "
     "leaf=%.3f roi=%+.1f..%+.1f | ransac_th=%.3f iters=%d | "
     "cyl: slice=%.2f radius=[%.2f,%.2f] | "
     "cluster: tol=%.3f min=%d max=%d | "
-    "spots=%zu | debug=%s watchdog=%.1fs | "
+    "spots=%zu | 中间话题=%s 调试输出=%s watchdog=%.1fs | "
     "mustika_pillar: pos=[%.1f,%.1f] h=%.2f r=%.3f | "
     "core_pillar: pos=[%.1f,%.1f] h=%.2f r=%.3f",
     leaf_size_, roi_min_x_, roi_max_x_,
@@ -316,7 +367,8 @@ LidarPerceptionNode::LidarPerceptionNode(const rclcpp::NodeOptions& options)
     slice_thickness_, radius_min_, radius_max_,
     cluster_tolerance_, min_cluster_size_, max_cluster_size_,
     building_positions_.size(),
-    debug_enabled_ ? "ON" : "OFF", watchdog_timeout_,
+    publish_intermediate_topics_ ? "ON(默认)" : "**OFF**",
+    debug_enabled_ ? "ON" : "OFF(比赛默认)", watchdog_timeout_,
     mustika_pillar_pos_.size()>=2 ? mustika_pillar_pos_[0] : -1.0,
     mustika_pillar_pos_.size()>=2 ? mustika_pillar_pos_[1] : -1.0,
     mustika_pillar_height_expected_, mustika_pillar_radius_expected_,
@@ -328,19 +380,115 @@ LidarPerceptionNode::LidarPerceptionNode(const rclcpp::NodeOptions& options)
 // ═══════════════════════════════════════════════════════════════════════════
 // 主回调 — 全管线编排
 // ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
+// [0] 点云 → 场地系（理由与后果见头文件「坐标系纪律」那段）
+//
+// ⚠️ 三个"不"：
+//    · 读不到 TF 时**不猜**（不回落身份变换 —— 那正好把坑重新踩一遍）
+//    · 已经在场地系时**不拷贝**（`out = in`，让常见情形零成本）
+//    · 时间戳**用点云那一帧的**，不用 `now()`（TF 是按时戳插值的）
+// ═══════════════════════════════════════════════════════════════════════════
+bool LidarPerceptionNode::cloud_to_world(const PointCloudPtr& in,
+                                         const std_msgs::msg::Header& hdr,
+                                         PointCloudPtr& out)
+{
+  // 没配场地系（或配成空串）= 明确"不做变换"模式 ⇒ 原样透传，与旧行为一致
+  if (world_frame_.empty()) { out = in; return true; }
+
+  if (hdr.frame_id.empty()) {
+    // ⚠️ 无从变换就**别猜**：`frame_id` 为空既可能"已在场系"也可能"根本没标"，
+    //    而两者的后果天差地别 —— 按"已在场系"处理就是拿整条链去赌。
+    //    （同 `BuildingSpot.msg` / `LidarResult.header` 里对空 frame_id 的处置。）
+    return false;
+  }
+
+  // 已经在场地系里 —— 直接过（仿真里若上游已换好就是这条路）
+  if (hdr.frame_id == world_frame_) { out = in; return true; }
+
+  if (!tf_buffer_) return false;
+
+  geometry_msgs::msg::TransformStamped tf_msg;
+  try {
+    tf_msg = tf_buffer_->lookupTransform(
+        world_frame_, hdr.frame_id, hdr.stamp,
+        tf2::durationFromSec(tf_timeout_sec_));
+  } catch (const tf2::TransformException&) {
+    return false;                      // 不回落、不猜 —— 交给调用方报 UNKNOWN
+  }
+
+  // ── 组装 Eigen 变换 ──
+  //    ⚠️ `Eigen::Quaternionf(w, x, y, z)`，**w 在前**（ROS 消息里也是 w 在前）
+  const auto& t = tf_msg.transform.translation;
+  const auto& q = tf_msg.transform.rotation;
+  Eigen::Affine3f T = Eigen::Affine3f::Identity();
+  T.translate(Eigen::Vector3f(static_cast<float>(t.x),
+                              static_cast<float>(t.y),
+                              static_cast<float>(t.z)));
+  T.rotate(Eigen::Quaternionf(static_cast<float>(q.w), static_cast<float>(q.x),
+                              static_cast<float>(q.y), static_cast<float>(q.z)));
+
+  out = std::make_shared<PointCloud>();
+  pcl::transformPointCloud(*in, *out, T);
+  // ⚠️ 变换**不改变** header 的语义字段（时间戳、序号）—— 只改了系，
+  //    而系的声明由调用方的 `world_header` 负责，这里不动它。
+  return true;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 一帧全报 UNKNOWN
+// ═══════════════════════════════════════════════════════════════════════════
+void LidarPerceptionNode::publish_all_unknown(const std_msgs::msg::Header& header,
+                                              const char* reason)
+{
+  LidarPerceptionResult result;
+  result.stamp = this->now();
+  result.ground_found    = false;
+  result.radar_connected = radar_connected_;
+  result.building_spots.reserve(building_positions_.size());
+
+  for (size_t i = 0; i < building_positions_.size(); ++i) {
+    BuildingSpot spot;
+    spot.id         = static_cast<int>(i);
+    spot.spot_x     = static_cast<float>(building_positions_[i].first);
+    spot.spot_y     = static_cast<float>(building_positions_[i].second);
+    spot.platform_z = spot_platform_z(i);
+    // ⚠️⚠️ **UNKNOWN，不是 EMPTY** —— 这一行就是本文件最要紧的一个字。
+    spot.status     = BuildingSpotStatus::UNKNOWN;
+    spot.height     = 0.0f;                // 没量 → 0；⚠️ 别拿它当"高度是 0"
+    spot.point_count = 0;
+    result.building_spots.push_back(spot);
+  }
+
+  RCLCPP_DEBUG(this->get_logger(),
+    "publish_all_unknown: %zu 个位报 UNKNOWN | 原因: %s",
+    result.building_spots.size(), reason ? reason : "?");
+
+  publish_unified_result(result, world_frame_.empty() ? header.frame_id : world_frame_);
+}
+
 void LidarPerceptionNode::cloud_callback(
     const sensor_msgs::msg::PointCloud2::SharedPtr msg)
 {
   auto t0 = std::chrono::steady_clock::now();
 
-  // ── 雷达在线标记 ──
+  // ── 雷达在线标记（⚠️⚠️ **位置有讲究，别往下面挪**）──
+  //   "收到过点云"是**雷达硬件活着**的证据，与 TF / 坐标系**无关** ——
+  //   所以它必须排在 `cloud_to_world` 那条早退分支**之前**：换系失败是**感知层**的事，
+  //   若因此不刷新 `last_cloud_time_`，看门狗会报"雷达断连" ——
+  //   那是**把定位故障诊断成硬件故障**（同 §零「准」那条）。
   last_cloud_time_ = this->now();
   if (!radar_connected_) {
     radar_connected_ = true;
     RCLCPP_INFO(this->get_logger(), "Radar reconnected");
   }
 
-  // ── 解包 (try-catch 防御) ──
+  // ── 预备: 解包 (防御性 try-catch: pcl::fromROSMsg 可能因格式不匹配抛异常) ──
+  //   ⚠️⚠️ **本步必须排在 [0] `cloud_to_world` 之前**（2026-09-24 复核修）：
+  //      先前的写法是 `cloud_to_world(raw_cloud, ...)` 在前、解包在后 ——
+  //      那时 `raw_cloud` **还没声明**（编译期 `use of undeclared identifier`），
+  //      而且就算侥幸编过，搬去场地系的也是**一份空点云**。
+  //      ⇒ 顺序定死: **解包 → 空帧判 → 搬场地系 → 之后全流程只认场地系**。
+  //      （同一条链在 `building_spot_analyzer.cpp:231` 已是这个顺序，两处必须一致。）
   PointCloudPtr raw_cloud = std::make_shared<PointCloud>();
   try {
     pcl::fromROSMsg(*msg, *raw_cloud);
@@ -354,6 +502,7 @@ void LidarPerceptionNode::cloud_callback(
     return;
   }
 
+  // ── 空帧判（⚠️ 放在换系之前：空点云没有"系"可言，也不该因此报 UNKNOWN）──
   if (raw_cloud->empty()) {
     consecutive_empty_frames_++;
     if (consecutive_empty_frames_ >= max_skip_frames_) {
@@ -364,13 +513,45 @@ void LidarPerceptionNode::cloud_callback(
   }
   consecutive_empty_frames_ = 0;
 
+  // ═══════════════════════════════════════════════════════════════════════
+  // [0] **搬到场地系**（2026-09-24 立；理由见头文件「坐标系纪律」那段）
+  //
+  //   ⚠️⚠️ 这一步是**整条雷达链的前提**，不是优化：本节点所有常量
+  //      （l0/l1/l2_height、roi_min_z、building_spot_x/y/z）都是**场地系**的值，
+  //      而进来的是雷达系点云。不换系 ⇒ 地面分层全空 + 建筑位裁到空气 + 对外坐标说谎。
+  //      它唯一的症状是"什么都没检测到"，**不报任何错**。
+  //
+  //   ⚠️ 失败时**不许继续**：换不成就是"这一帧无从判断"，报 UNKNOWN 让主控知道
+  //      （"没量到"与"量到是空的"是两件事，见 `BuildingSpotStatus::UNKNOWN`）。
+  // ═══════════════════════════════════════════════════════════════════════
+  PointCloudPtr world_cloud;
+  if (!cloud_to_world(raw_cloud, msg->header, world_cloud)) {
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+      "**点云换不到场地系 '%s'**（输入 frame_id='%s'）⇒ 本帧全部建筑位报 UNKNOWN。"
+      "⚠️ 常见原因: ① `perception_pipeline` 没起 ⇒ 没有人广播 world→odom；"
+      "② 里程计还没出第一帧；③ `world_frame` 参数与实际 TF 树上的名字不符",
+      world_frame_.c_str(), msg->header.frame_id.c_str());
+    publish_all_unknown(msg->header, "point cloud not in world frame");
+    return;
+  }
+
+  // 输出用 header：**时间戳照旧继承曝光/扫描时刻**，只把 frame_id 改成场地系。
+  // ⚠️ 本帧之后所有发布（结果、诊断、调试点云、Marker）**都用它** ——
+  //    点云与坐标都已经在场地系，标错系比不标更毒。
+  // ⚠️ `world_frame_` 为空 = 本节点被配成"不换系"，那时沿用输入系（与旧行为一致）。
+  std_msgs::msg::Header world_header = msg->header;
+  if (!world_frame_.empty()) {
+    world_header.frame_id = world_frame_;
+  }
+  const std::string& output_frame = world_header.frame_id;
+
   PipelineTiming timing;
   timing.input_points = static_cast<int>(raw_cloud->size());
 
   // ═══════════════════════════════════════════════════════════════════════
-  // [1] 预处理
+  // [1] 预处理（⚠️ 喂**场地系**那份 —— ROI 的 z 上下限是绝对高度）
   // ═══════════════════════════════════════════════════════════════════════
-  auto [filtered, preproc_ms] = preprocess_stage(raw_cloud);
+  auto [filtered, preproc_ms] = preprocess_stage(world_cloud);
   timing.preprocess_ms = preproc_ms;
 
   if (filtered->size() < 50) {
@@ -426,36 +607,42 @@ void LidarPerceptionNode::cloud_callback(
   timing.total_ms = ms_dur(t_end - t0).count();
 
   // ═══════════════════════════════════════════════════════════════════════
-  // 发布中间结果 —— ⚠️ 2026-09-23 起**挂到 `debug_enabled` 下**
+  // 发布中间结果 —— ⚠️ 2026-09-24 **按"有没有消费者"拆成两半**
   // ═══════════════════════════════════════════════════════════════════════
-  // 原先**无条件每帧执行**，而它发的是**纯可视化**内容（2026-09-23 逐条核实）：
+  // ⚠️⚠️ 2026-09-23 曾把这 10 条**整体**挂到 `debug_enabled` 下，依据是一张
+  //     写"代码订阅者 0"的表。**2026-09-24 逐条实测后更正**——那张表**对了一半**：
   //
-  //   话题                                     代码订阅者  RViz 显示项
-  //   /perception/lidar/filtered                    0          0
-  //   /perception/lidar/ground                      0          1
-  //   /perception/lidar/non_ground                  0          1
-  //   /perception/lidar/l0_surface                  0          0   ← 孤儿
-  //   /perception/lidar/l1_surface                  0          0   ← 孤儿
-  //   /perception/lidar/l2_surface                  0          0   ← 孤儿
-  //   /perception/lidar/ground_plane                0          0   ← 孤儿
-  //   /perception/lidar/pillars  (MarkerArray)      0          1
-  //   /perception/lidar/obstacles(MarkerArray)      0          1
-  //   /perception/lidar/building_spots(MarkerArray) 0          1
+  //   话题                              真实代码订阅者（`create_subscription` 数出来的）
+  //   /perception/lidar/filtered        **1** ground_segmenter
+  //   /perception/lidar/non_ground      **3** building_spot_analyzer / cluster_extractor /
+  //                                            cylinder_detector
+  //   /perception/lidar/ground          0
+  //   /perception/lidar/l0/l1/l2_surface 0
+  //   /perception/lidar/ground_plane    0
+  //   /perception/lidar/pillars         0
+  //   /perception/lidar/obstacles       0
+  //   /perception/lidar/building_spots  0
+  //   /perception/lidar/debug_cloud     0
   //
-  // ⇒ **10 条话题、6 次整份点云 `pcl::toROSMsg` 拷贝**，每帧都做，而**代码里零订阅者**。
-  //    `LidarResult.msg` 的头注释早已定性："MarkerArray / debug_cloud 保留，
-  //    但从此**只作可视化**，不再承担数据职责" —— 数据走 `LidarResult`。
-  //    所以它们**全部属于"调试输出"**，比赛模式就该关（任务书 §1.7）。
+  //   ⚠️ 实测方法也有教训：中间有一版用 `grep -l "<话题>" src/` 数，得出"9/10 条有订阅者"
+  //      —— 那是错的，`grep -l` 把**发布者**也数进去了。**必须看 `create_subscription`
+  //      那个调用块**。这条已写进 `scripts/check_topic_consumers.py` 的文件头。
   //
-  // ⚠️ **代价（要知道，别当成 bug）**：`debug_enabled: false` 时 RViz 里
-  //    **柱子/障碍/建筑位/地面/非地面都看不到**（它们是这 10 条话题画的）。
-  //    台架要看就改 `config/debug_flags.yaml` 的 `debug_enabled: true` ——
-  //    ⚠️ **别去改回这里**：那等于把比赛模式的 CPU 又还回去了。
+  //   ⇒ 结论：**2 条是数据接口**（组件的输入），**8 条是纯可视化**。两者的开关不是一回事：
+  //      · 数据 ⇒ `publish_intermediate_topics_`（默认 true）：关掉会让**组件链饿死**，
+  //        症状是"组件全都不出结果"，与"代码坏了"长得一样（而跑单体时**完全看不出来**）。
+  //      · 可视化 ⇒ `debug_enabled_`（比赛 false）：关掉没人饿死，只是 RViz 里看不见。
+  //   ⇒ 比赛模式因此只做 **2 次**整份点云拷贝（原来 6 次）—— 组件喂饱 + CPU 省下，两头都要。
   //
-  // ⚠️ 注意与上面"调试点云"的区别：`publish_debug_cloud`（`:463` 附近）发的是
-  //    **另一条** `debug_cloud`，它**本来就在这个开关下**。本条漏了，现在补齐。
+  //   ⇒ 纪律（2026-09-24 立，台账 §八 有账）:
+  //      **把一个话题挂到任何开关下之前，先列出它的订阅者** ——
+  //      `python3 scripts/check_topic_consumers.py`（它就是这条动作的自动化）。
+  //      判据一句话: **数据话题挂拓扑开关，纯可视化才挂调试开关。**
+  if (publish_intermediate_topics_) {
+    publish_intermediate_data(filtered, gr, world_header);
+  }
   if (debug_enabled_) {
-    publish_intermediate(filtered, gr, cylinders, obstacles, spots, msg->header);
+    publish_intermediate_viz(gr, cylinders, obstacles, spots, world_header);
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -481,16 +668,20 @@ void LidarPerceptionNode::cloud_callback(
   result.ground_plane[2] = static_cast<float>(gr.coeff.values[2]);
   result.ground_plane[3] = static_cast<float>(gr.coeff.values[3]);
 
-  // ⚠️ frame_id 取自**输入点云的 header**（`msg` 是本回调的入参点云）。
-  //    本节点没有坐标变换，输出坐标系 = 输入坐标系，继承是最诚实的做法。
-  publish_unified_result(result, msg->header.frame_id);
+  // ⚠️ frame_id = **场地系**（2026-09-24 改）。
+  //    上面已经把点云搬到场地系了，所有结果（建筑位/柱/障碍的坐标）**真在那个系里** ——
+  //    这正是第一宗旨「准」那条的原话："坐标真在 `header.frame_id` 声明的那个系里"。
+  //    ⚠️ 老写法是继承输入点云的 frame_id，而坐标填的是**场地常量** ⇒ **消息在说谎**
+  //       （表现为：下游拿 `livox_frame` 去变换，塔被投影到车前方 8m 的空气里）。
+  // ⚠️ `world_frame_` 为空 = 本节点被配成"不做变换"，那时才回落到输入系（与旧行为一致）。
+  publish_unified_result(result, output_frame);
 
   // ═══════════════════════════════════════════════════════════════════════
   // 调试点云
   // ═══════════════════════════════════════════════════════════════════════
   if (debug_enabled_) {
     publish_debug_cloud(gr.ground, gr.non_ground, cylinders,
-                        obstacles, spots, msg->header);
+                        obstacles, spots, world_header);
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -1054,13 +1245,18 @@ void LidarPerceptionNode::classify_obstacle(Obstacle& obs)
     if(s>0.5f){obs.type=ObstacleType::EARTH_CUBE; obs.confidence=s; return;}}
 
   // Sky cube vs Mustika (200mm)
-  { float s=(in_range(obs.length,sky_cube_size_)+in_range(obs.width,sky_cube_size_)+in_range(obs.height,sky_cube_size_))/3.f;
-    if(s>0.5f){
-      bool spherical = obs.eigen_ratio_1>0 && obs.eigen_ratio_2>0 &&
-        std::abs(obs.eigen_ratio_1-1.f)<sphere_eigen_tol_ &&
-        std::abs(obs.eigen_ratio_2-1.f)<sphere_eigen_tol_;
-      obs.type = spherical ? ObstacleType::MUSTIKA : ObstacleType::SKY_CUBE;
-      obs.confidence = spherical ? s*0.85f : s; return;}}
+  // ⚠️ 2026-09-25：与组件版 `cluster_extractor.cpp` **同步修**（§六 的"两份实现都要改"）——
+  //    原实现只用 `sky_cube_size_` 算尺寸分，`mustika_size` 这个键声明了却**没进任何计算**
+  //    ⇒ 改 yaml 里 `mustika_size` 静默不生效。现在两个键各算各的分。
+  //    ⚠️ 今天两值都是 0.20 ⇒ **数值零变化**；但两份实现必须同时改，
+  //       漏一份就会"跑单体时对、跑组件时又变回去"。
+  { float sc=(in_range(obs.length,sky_cube_size_)+in_range(obs.width,sky_cube_size_)+in_range(obs.height,sky_cube_size_))/3.f;
+    float ms=(in_range(obs.length,mustika_size_)+in_range(obs.width,mustika_size_)+in_range(obs.height,mustika_size_))/3.f;
+    bool spherical = obs.eigen_ratio_1>0 && obs.eigen_ratio_2>0 &&
+      std::abs(obs.eigen_ratio_1-1.f)<sphere_eigen_tol_ &&
+      std::abs(obs.eigen_ratio_2-1.f)<sphere_eigen_tol_;
+    if(spherical && ms>0.5f){obs.type=ObstacleType::MUSTIKA; obs.confidence=ms*0.85f; return;}
+    if(sc>0.5f){obs.type=ObstacleType::SKY_CUBE; obs.confidence=sc; return;}}
 
   obs.type = ObstacleType::UNKNOWN;
   obs.confidence = 0.f;
@@ -1155,8 +1351,30 @@ std::tuple<bool, float, int> LidarPerceptionNode::detect_top_surface(
 // ═══════════════════════════════════════════════════════════════════════════
 // 发布: 中间结果 (所有话题)
 // ═══════════════════════════════════════════════════════════════════════════
-void LidarPerceptionNode::publish_intermediate(
+void LidarPerceptionNode::publish_intermediate_data(
     const PointCloudPtr& filtered,
+    const GroundResult& gr,
+    const std_msgs::msg::Header& header)
+{
+  auto pub_cloud = [&](const PointCloudPtr& cloud, auto& pub) {
+    sensor_msgs::msg::PointCloud2 ros_msg;
+    pcl::toROSMsg(*cloud, ros_msg);
+    ros_msg.header = header;
+    pub->publish(ros_msg);
+  };
+
+  pub_cloud(filtered,      pub_filtered_);     // ← ground_segmenter 要它
+  pub_cloud(gr.non_ground, pub_non_ground_);   // ← 3 个组件要它
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// [纯可视化] 8 条零订阅者的话题 —— 只给 RViz 看
+//
+// ⚠️ 它们**不是数据接口**（`python3 scripts/check_topic_consumers.py` 逐条复核过），
+//    所以挂在 `debug_enabled` 下：比赛模式关掉它们**不饿死任何人**，
+//    只是 RViz 里看不到地面/分层/柱子/障碍/建筑位 —— 那是预期的。
+// ═══════════════════════════════════════════════════════════════════════════
+void LidarPerceptionNode::publish_intermediate_viz(
     const GroundResult& gr,
     const std::vector<CylinderDetection>& cylinders,
     const std::vector<Obstacle>& obstacles,
@@ -1170,9 +1388,7 @@ void LidarPerceptionNode::publish_intermediate(
     pub->publish(ros_msg);
   };
 
-  pub_cloud(filtered,        pub_filtered_);
   pub_cloud(gr.ground,       pub_ground_);
-  pub_cloud(gr.non_ground,   pub_non_ground_);
   pub_cloud(gr.l0_surface,   pub_l0_surface_);
   pub_cloud(gr.l1_surface,   pub_l1_surface_);
   pub_cloud(gr.l2_surface,   pub_l2_surface_);
@@ -1295,6 +1511,11 @@ constexpr uint8_t kMsgSpotEmpty      = 0;
 constexpr uint8_t kMsgSpotOneEarth   = 1;
 constexpr uint8_t kMsgSpotTwoEarth   = 2;
 constexpr uint8_t kMsgSpotFullTower  = 3;
+// ⚠️ **没量成**（2026-09-24 新增）—— 与 `msg/BuildingSpot.msg` 的 `state` 逐值一致，
+//    且**走串口**（`protocol_encoder.cpp` 原样写 u8）⇒ 已记入 `comm_params.yaml`
+//    头部「未冻结参数」清单**第 6 项**（单方提案，待与主控对齐）。
+//    ⚠️ **它绝不能落进 `kMsgSpotEmpty`**（见下面那个函数）。
+constexpr uint8_t kMsgSpotUnknown    = 4;
 // BuildingSpot.msg 的 top_color
 constexpr uint8_t kMsgTopColorNone    = 0;
 constexpr uint8_t kMsgTopColorUnknown = 3;
@@ -1357,8 +1578,13 @@ uint8_t to_msg_spot_state(BuildingSpotStatus s)
     case BuildingSpotStatus::ONE_EARTH:      return kMsgSpotOneEarth;
     case BuildingSpotStatus::TWO_EARTH:      return kMsgSpotTwoEarth;
     case BuildingSpotStatus::COMPLETE_TOWER: return kMsgSpotFullTower;
+    // ⚠️⚠️ **这一行是本文件最要紧的一行**（2026-09-24）—— 漏了它，
+    //    UNKNOWN 会落进下面的兜底变成 **0 = EMPTY**，于是主控把"我没量到"
+    //    读成"这个位是空的"：**塔明明建着，它以为没建**。
+    case BuildingSpotStatus::UNKNOWN:        return kMsgSpotUnknown;
   }
-  return kMsgSpotEmpty;
+  // ⚠️ 兜底也**不许是 EMPTY** —— 将来再加枚举值时，宁可报未知也不许冒充"空"。
+  return kMsgSpotUnknown;
 }
 
 /// @brief 从圆柱列表里挑"最像目标柱"的那一个；挑不出返回 nullptr
@@ -1641,19 +1867,25 @@ void LidarPerceptionNode::publish_diagnostics(
   add("obstacle_count",      static_cast<double>(result.obstacles.size()));
   add("building_spot_count", static_cast<double>(result.building_spots.size()));
 
-  int empty_c = 0, one_c = 0, two_c = 0, tower_c = 0;
+  int empty_c = 0, one_c = 0, two_c = 0, tower_c = 0, unknown_c = 0;
   for (const auto& s : result.building_spots) {
     switch (s.status) {
-      case BuildingSpotStatus::EMPTY:          empty_c++; break;
-      case BuildingSpotStatus::ONE_EARTH:      one_c++;   break;
-      case BuildingSpotStatus::TWO_EARTH:      two_c++;   break;
-      case BuildingSpotStatus::COMPLETE_TOWER: tower_c++; break;
+      case BuildingSpotStatus::EMPTY:          empty_c++;   break;
+      case BuildingSpotStatus::ONE_EARTH:      one_c++;     break;
+      case BuildingSpotStatus::TWO_EARTH:      two_c++;     break;
+      case BuildingSpotStatus::COMPLETE_TOWER: tower_c++;   break;
+      // ⚠️ **单独一档**：`unknown` 涨 = "没量成"（TF 不可用等），
+      //    与 `empty` 涨（真量到是空的）**是两件事** —— 现场的读法完全不同。
+      case BuildingSpotStatus::UNKNOWN:        unknown_c++; break;
     }
   }
   add("spots_empty",     static_cast<double>(empty_c));
   add("spots_one_earth", static_cast<double>(one_c));
   add("spots_two_earth", static_cast<double>(two_c));
   add("spots_tower",     static_cast<double>(tower_c));
+  // ⚠️ 与 `spots_empty` **必须分开读**：这一项涨说明**这一帧没量成**，
+  //    不是"这些位是空的"（见 `BuildingSpotStatus::UNKNOWN`）。
+  add("spots_unknown",   static_cast<double>(unknown_c));
 
   // ⚠️ 这两个计数是**内部**分类（地球/天空方块分得开），而发出去的
   //    `Obstacle.type` 把两者都归成 DROPPED_BLOCK（协议里没有更细的档）。

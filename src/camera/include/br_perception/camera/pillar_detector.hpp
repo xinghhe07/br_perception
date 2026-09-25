@@ -75,6 +75,50 @@ struct PillarImageResult
 class PillarDetector : public rclcpp::Node
 {
 public:
+  // ═════════════════════════════════════════════════════════════════════════════
+  // 纯函数：**候选柱子的验证**（2026-09-25 摘出来，为单测）
+  //
+  // ⚠️ 它判的是"这团深绿/棕色**是不是一根柱子**"—— 而柱子的位置喂给
+  //    `mustika_pillar_check`（**那 250 分**）当"球在不在柱上"的基准点。
+  // ═════════════════════════════════════════════════════════════════════════════
+
+  /// 验证用到的参数（名字与 `camera_params.yaml` 的键一致）
+  struct PillarParams {
+    double min_color_fill{0.55};        ///< 包围盒内颜色像素占比下限（**硬拒**）
+    double max_upright_angle{15.0};     ///< 主轴偏离垂直的最大角度（度），越低分越少
+    double pillar_diameter{0.270};      ///< 柱子直径 (m)
+    double mustika_pillar_height{0.500};///< 穆斯蒂卡柱高 (m)
+    double core_pillar_height{0.800};   ///< 核心支柱高 (m)
+    double focal_length_px{600.0};
+  };
+
+  /// @brief 候选柱子的验证
+  /// @param bgr      原图（**当前实现没用到它**，留着是为了将来加颜色复核）
+  /// @param mask     颜色 mask（CV_8UC1，255 = 深绿/棕）
+  /// @param bbox     候选包围盒
+  /// @param contour  候选轮廓
+  /// @param result   ⚠️ **仅成功时填入**；不过判据就 `return false` 早退
+  /// @param params   参数
+  ///
+  /// **判据（按实现）**：
+  ///   · **硬拒**：`fill_ratio < min_color_fill`（包围盒内颜色占比）
+  ///   · **硬拒**：bbox 与图像无交集（宽或高 <= 0）
+  ///   · 评分：`conf = 0.40×填充 + 0.35×竖直度 + 0.25×实心度`
+  ///
+  /// ⚠️⚠️ **有一段是死代码**（2026-09-25 复核发现）：3b「尺寸合理性」算了
+  ///    `est_distance` 与 `expected_height_px`，注释写"不做硬拒绝，**降低后续评分**"，
+  ///    **但后面没有任何降分代码** ⇒ 那几个变量算完就丢。
+  ///    ⇒ **改它不会有任何效果**，而这正是"配了不生效"最难发现的一种形状。
+  ///    ⚠️ 本函数**只做搬运**，没有顺手删它 —— 删/接是**产品决定**（见台账）。
+  static bool validate_pillar(const cv::Mat& bgr, const cv::Mat& mask,
+                              const cv::Rect& bbox,
+                              const std::vector<cv::Point>& contour,
+                              PillarImageResult& result,
+                              const PillarParams& params);
+
+  /// 把当前成员参数打包（**薄包装用**）
+  [[nodiscard]] PillarParams make_params() const;
+
   explicit PillarDetector(const rclcpp::NodeOptions& options = rclcpp::NodeOptions());
 
 private:

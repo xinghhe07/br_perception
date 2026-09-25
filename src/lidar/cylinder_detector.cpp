@@ -529,17 +529,33 @@ CylinderDetector::deduplicate(
 // ═══════════════════════════════════════════════════════════════════════════
 // 按高度分类
 // ═══════════════════════════════════════════════════════════════════════════
-void CylinderDetector::classify_by_height(std::vector<CylinderDetection>& cyls)
+void CylinderDetector::classify_by_height(std::vector<CylinderDetection>& cyls,
+                                          const HeightClassParams& params)
 {
   for (auto& c : cyls) {
-    if (c.height >= mustika_h_min_ && c.height <= mustika_h_max_) {
+    // ⚠️ 闭区间（`>=` / `<=`）：恰好等于端点算在内。
+    if (c.height >= params.mustika_h_min && c.height <= params.mustika_h_max) {
       c.type = CylinderDetection::MUSTIKA_PILLAR;
-      c.confidence = std::max(c.confidence, 0.75f);
-    } else if (c.height >= core_h_min_ && c.height <= core_h_max_) {
+      // ⚠️ `std::max` ⇒ **只抬不降**。写成直接赋值会把上游更可靠的置信度**压下来**。
+      c.confidence = std::max(c.confidence, params.classified_confidence);
+    } else if (c.height >= params.core_h_min && c.height <= params.core_h_max) {
       c.type = CylinderDetection::CORE_PILLAR;
-      c.confidence = std::max(c.confidence, 0.75f);
+      c.confidence = std::max(c.confidence, params.classified_confidence);
     }
+    // ⚠️ **落在两段之外 ⇒ 什么都不做**（`type` 保持原值，通常是 UNKNOWN）。
+    //    中间的 0.60~0.70 空档是**刻意**的（见头文件）：填上它 = 给每个噪声团贴标签。
   }
+}
+
+// ── 成员薄包装：行为逐位不变 ──
+void CylinderDetector::classify_by_height(std::vector<CylinderDetection>& cyls)
+{
+  HeightClassParams p;
+  p.mustika_h_min = mustika_h_min_;
+  p.mustika_h_max = mustika_h_max_;
+  p.core_h_min    = core_h_min_;
+  p.core_h_max    = core_h_max_;
+  classify_by_height(cyls, p);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

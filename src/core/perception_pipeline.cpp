@@ -86,9 +86,28 @@ inline bool throttled(std::chrono::steady_clock::time_point& last, double ws)
     s += " —— ⚠️ 本模式当前**不发帧**"
          "（雷达停 = 没有 3D 内容；相机是 2D，要融合层(模块21,未写)才有用）。"
          "主控侧看到的是「完全收不到」，别去查链路";
+    // ⚠️⚠️ 2026-09-24 补一条**这条链自己造成的**后果（不是实现缺陷，是设计事实）：
+    s += "。⚠️ **注意：天空方块判色链也停了** —— `sky_block_detector` 的投影 ROI"
+         "**由雷达触发**（只有雷达报 `state == 完整塔` 的位才会被投影）⇒ "
+         "**雷达停 = 相机不知道该看哪几个位** ⇒ 那 40/80 分在降级模式下**拿不到**。"
+         "这不是 bug，是「相机不做检测、只做判色」这条切分的必然代价；"
+         "要改就得让相机自己找方块（YOLO 那一路，本版未实现）";
   }
   return s;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// `CameraSkyBlock.msg` 的取值（⚠️ **与消息头注释逐值一致，不可重排**）
+// ═══════════════════════════════════════════════════════════════════════════
+// 本文件只读这几个字段，所以就地定义 —— 与 `lidar_perception_node.cpp` 里
+// `kMsgSpotEmpty` 那组是同一个做法（见那边的注释：定常量比散落魔数好查）。
+constexpr uint8_t kSkyRoiRadarProjected = 0;   ///< roi_source: 雷达建筑位投影（主路）
+constexpr uint8_t kSkyStateConfirmed    = 1;   ///< state: 已确认（连续 N 帧满足）
+constexpr uint8_t kSkyColorNone         = 0;   ///< top_color: 没有方块
+constexpr uint8_t kSkyColorUnknown      = 3;   ///< top_color: 有方块但判不出色
+
+/// `BuildingSpot.msg` 的 `source`（⚠️ 同样逐值一致）
+constexpr uint8_t kMsgSourceFusion      = 2;   ///< 融合（状态来自雷达 + 颜色来自相机）
 
 }  // namespace
 
@@ -141,6 +160,10 @@ PerceptionPipeline::PerceptionPipeline(const rclcpp::NodeOptions& options)
   this->declare_parameter<std::string>("lidar_topic",       lidar_topic_);
   this->declare_parameter<std::string>("camera_topic",      camera_topic_);
   this->declare_parameter<std::string>("comm_diag_topic",   comm_diag_topic_);
+  // ── 天空方块判色（模块 9）──
+  this->declare_parameter<std::string>("sky_block_wide_topic", sky_block_wide_topic_);
+  this->declare_parameter<std::string>("sky_block_tele_topic", sky_block_tele_topic_);
+  this->declare_parameter<double>("sky_block_timeout_sec", sky_block_timeout_sec_);
   this->declare_parameter<std::string>("fusion_state_topic", fusion_state_topic_);
   this->declare_parameter<std::string>("output_topic",      output_topic_);
   this->declare_parameter<std::string>("emergency_stop_topic", emergency_stop_topic_);
@@ -171,6 +194,9 @@ PerceptionPipeline::PerceptionPipeline(const rclcpp::NodeOptions& options)
   this->get_parameter("lidar_topic",         lidar_topic_);
   this->get_parameter("camera_topic",        camera_topic_);
   this->get_parameter("comm_diag_topic",     comm_diag_topic_);
+  this->get_parameter("sky_block_wide_topic", sky_block_wide_topic_);
+  this->get_parameter("sky_block_tele_topic", sky_block_tele_topic_);
+  this->get_parameter("sky_block_timeout_sec", sky_block_timeout_sec_);
   this->get_parameter("fusion_state_topic",  fusion_state_topic_);
   this->get_parameter("output_topic",        output_topic_);
   this->get_parameter("emergency_stop_topic", emergency_stop_topic_);
@@ -229,6 +255,33 @@ PerceptionPipeline::PerceptionPipeline(const rclcpp::NodeOptions& options)
     std::bind(&PerceptionPipeline::on_camera_frame, this, std::placeholders::_1));
 
   // 通信诊断：发布端默认 RELIABLE depth 10
+  // ── 天空方块判色（模块 9）——
+  //  ⚠️⚠️ 为什么本节点要订它：**判色是相机独有的能力，雷达对颜色无能为力**
+  //     （`building_spot_analyzer` 原文："完整塔: 雷达无法判断天空方块朝上颜色"）。
+  //     而规则 3.5.6/3.5.7 里那 40/80 分的归属**只由顶面颜色决定** ——
+  //     不接这一路，主控拿到的 `BuildingSpot.top_color` 就永远是 `UNKNOWN(3)`。
+  //  ⚠️ QoS 必须与发布端一致：`sky_block_detector` 用的是
+  //     `rclcpp::QoS(1).best_effort()`（BEST_EFFORT 订阅接 BEST_EFFORT 发布）。
+  //  ⚠️⚠️ **这两路必须用 lambda，不能用 `std::bind` 绑第二个实参**。
+  //     `create_subscription` 走的是 `AnySubscriptionCallback::set()`，它靠
+  //     **回调的实参个数**去匹配那几种合法签名（`(msg)` 或 `(msg, MessageInfo&)`）。
+  //     而 `std::bind(&on_sky_block, this, _1, false)` 产生的可调用体原型是
+  //     `void(SharedPtr<CameraSkyBlock>, bool)` —— **两参且第二参不是 MessageInfo**，
+  //     一种都对不上 ⇒ 编译期死在 `any_subscription_callback.hpp` 里那句
+  //     `no match for operator=`，**报错指向 rclcpp 内部、看不出是本行引起的**
+  //     （2026-09-25 首次编到本文件时栽在这）。
+  //     lambda 把它收成 `(msg)` 一参，`is_tele` 作为**捕获**而不是实参进闭包。
+  sub_sky_wide_ = this->create_subscription<br_perception::msg::CameraSkyBlock>(
+      sky_block_wide_topic_, rclcpp::QoS(1).best_effort(),
+      [this](br_perception::msg::CameraSkyBlock::SharedPtr msg) {
+        on_sky_block(msg, /*is_tele=*/false);
+      });
+  sub_sky_tele_ = this->create_subscription<br_perception::msg::CameraSkyBlock>(
+      sky_block_tele_topic_, rclcpp::QoS(1).best_effort(),
+      [this](br_perception::msg::CameraSkyBlock::SharedPtr msg) {
+        on_sky_block(msg, /*is_tele=*/true);
+      });
+
   sub_comm_diag_ = this->create_subscription<diagnostic_msgs::msg::DiagnosticArray>(
     comm_diag_topic_, rclcpp::QoS(10),
     std::bind(&PerceptionPipeline::on_comm_diag, this, std::placeholders::_1));
@@ -276,9 +329,11 @@ PerceptionPipeline::PerceptionPipeline(const rclcpp::NodeOptions& options)
   last_degradation_pub_ = std::chrono::steady_clock::now();
 
   RCLCPP_INFO(this->get_logger(),
-    "PerceptionPipeline ready | in: lidar=%s camera=%s comm_diag=%s | out: %s | "
+    "PerceptionPipeline ready | in: lidar=%s camera=%s comm_diag=%s "
+    "sky_blocks(wide/tele)=%s/%s | out: %s | "
     "publish=%.1fHz | timeouts(lidar/cam/fusion/odom/comm)=%.2f/%.2f/%.2f/%.2f/%.2fs",
     lidar_topic_.c_str(), camera_topic_.c_str(), comm_diag_topic_.c_str(),
+    sky_block_wide_topic_.c_str(), sky_block_tele_topic_.c_str(),
     output_topic_.c_str(), publish_rate_hz_,
     lidar_timeout_sec_, camera_timeout_sec_, fusion_timeout_sec_,
     odom_timeout_sec_, comm_timeout_sec_);
@@ -317,85 +372,244 @@ void PerceptionPipeline::on_lidar_result(
   try_publish(/*is_event=*/true);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// 天空方块判色（模块 9）—— 只做"记下来"
+// ═══════════════════════════════════════════════════════════════════════════════
+void PerceptionPipeline::on_sky_block(
+    const br_perception::msg::CameraSkyBlock::SharedPtr msg, bool is_tele)
+{
+  if (!msg) return;
+
+  // ⚠️ 判色不是"相机链活没活"的证据 —— 它只在**雷达说有完整塔**时才发消息。
+  //    所以这里**不调 `mark_seen(kSrcCamera, ...)`**：拿它当心跳会让
+  //    "相机挂了但雷达也没塔"这段时间看起来像相机活着（那正是最坏的情况）。
+  // ⚠️⚠️ **只收投影主路的结果**（`roi_source == 0`）。
+  //    手动 ROI（台架调阈值用）与将来的 YOLO 通道的 `spot_id` 契约是 **-1** ——
+  //    若让它们进表，`-1` 会被 clamp 成 0 而**把结论错挂到 0 号建筑位上**。
+  //    这类"负数穿进无符号"的错在本仓库已经咬过（见 `BuildingSpot.msg` 的 state 注释）。
+  if (msg->roi_source != kSkyRoiRadarProjected) return;
+  if (msg->spot_id < 0) return;
+
+  // ⚠️ 每个位只留**最近一条**（按收到顺序覆盖）。不做排序/累加：
+  //    时序滞回是相机节点自己的活（它按位各有一套确认器）。
+  auto& store = is_tele ? sky_tele_ : sky_wide_;
+  store[static_cast<uint32_t>(msg->spot_id)] = *msg;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 相机聚合帧（模块 10 的输出）—— 本节点只**借它判"相机链活没活"**
+// ═══════════════════════════════════════════════════════════════════════════════
 void PerceptionPipeline::on_camera_frame(
     const br_perception::msg::CameraFrame::SharedPtr msg)
 {
-  mark_seen(kSrcCamera, true);
+  if (!msg) return;
 
-  // ⚠️ 本节点**只关心相机链活没活**，不用它的 2D 检测结果 ——
-  //    那些要经融合层投影到 3D 才有用，而融合层（模块 21）还没实现。
-  //    存时间戳是为了"多久没来了"的判定，也为将来接融合留个抓手。
-  last_camera_stamp_ = rclcpp::Time(msg->header.stamp,
-                                    this->get_clock()->get_clock_type());
-  if (stamp_is_unset(*last_camera_stamp_)) {
-    // 发布方没填时间戳 → 退回本节点收到它的时刻（不理想，但比按 1970 年算强）。
-    // ⚠️ 按**来源**只告警一次，且用**成员**而不是函数级 `static`（2026-09-22 用户复核 P2-9）：
-    //    函数级 static 在多线程执行器下是竞态，同进程多实例（容器里跑两份）还会互相影响
-    //    —— 而它本来要解决的恰恰是"别漏报每个来源"，用 static 正好违背它。
-    if (!warned_camera_stamp_) {
-      warned_camera_stamp_ = true;
-      RCLCPP_WARN(this->get_logger(),
-        "相机聚合帧的 header.stamp 为 0（发布方未填时间戳）—— 本节点退回用到达时刻");
+  // ⚠️⚠️ 本回调**不能**写成 `mark_seen(kSrcCamera, true)`。理由：
+  //
+  //    `camera_perception_node` 是**聚合薄壳** —— 它的职责是"订阅已有话题、按槽汇总"，
+  //    所以**一个检测器都没起时它照样按自己的频率发帧**，只是每槽 `state == S_NEVER`。
+  //    拿"聚合帧到了"当相机链的活证据，等于让一个空壳自证：
+  //    诊断报 `camera OK`，而主控拿到的 `building_spots.top_color` 恒是 UNKNOWN ——
+  //    正是本文件反复强调的"不许让诊断撒谎"。
+  //    `mark_seen` 那个 `healthy` 参数存在的全部意义就在这里（`kFailed` 的定义是
+  //    "**有数据但自报不健康**"，见 `publish_degradation_state` 的文案）。
+  //
+  //    ⇒ 健康判据取 **`slot_status`**：`msg/SlotStatus.msg` 自己写明
+  //      "机器可读，下游按这个分支，**不要按 `stale_sec` 猜**"。
+  //      ⚠️ 也不用 `frame_age_sec`：那是**把 8 个槽塌缩成一个标量**，而槽状态
+  //         已经按 `camera_perception_node` 的 `fresh_tolerance_sec_` 逐槽判好了 ——
+  //         再拿一个自己的阈值去重判同一个东西，只会多出一处会漂移的判据。
+  //
+  //  三档 → `kOk` / `kFailed` / 不置位，逐档理由：
+  //    · 有槽 FRESH           → 相机链确实在产出            → `kOk`
+  //    · 无 FRESH 但有 STALE   → 跑过、现在慢了或停了        → `kFailed`
+  //    · 全部 NEVER           → **整个回调不 `mark_seen`**（见下）
+  //
+  //  ⚠️⚠️ 第三档**刻意不 mark_seen**，而不是 `mark_seen(..., false)`：
+  //     `kNever` 只在 `last_seen` 未设置时出现，它的语义是"**从没见过** →
+  //     配置问题（还没起 / 话题名错），**不是故障**"（头文件"降级状态机"那节，
+  //     以及 `refresh_states()` 里那句"诊断里也不许报 WARN"）。
+  //     若这里一律 mark_seen，检测器还没起的那段时间就会报 `kFailed`
+  //     ⇒ 诊断从启动起就挂黄，**而 `decide_mode()` 也会由 `kStarting` 提前跳到
+  //     `kLidarOnly`** —— 把一个"还没起"说成"坏了"。现场这两件事要做的事完全不同。
+  bool any_fresh = false;
+  bool any_stale = false;
+  for (const auto& s : msg->slot_status) {
+    if (s.state == br_perception::msg::SlotStatus::S_FRESH) {
+      any_fresh = true;
+      break;                       // FRESH 优先：找到了就不必再扫 STALE
     }
-    last_camera_stamp_ = this->get_clock()->now();
+    if (s.state == br_perception::msg::SlotStatus::S_STALE) any_stale = true;
   }
 
-  try_publish(/*is_event=*/true);
+  if (any_fresh)      mark_seen(kSrcCamera, /*healthy=*/true);
+  else if (any_stale) mark_seen(kSrcCamera, /*healthy=*/false);
+  // else: 全 NEVER → 不 mark_seen（留 `kNever`，理由见上）
+
+  // ⚠️⚠️ 原来这里有一行 `last_camera_stamp_ = rclcpp::Time(...)`，**2026-09-25 删**：
+  //    那个成员**只写不读** —— 每帧算一次 `rclcpp::Time` 然后丢掉（**死写**）。
+  //    健康判定**本来就该用槽状态**（上面那段 ⚠️⚠️ 的理由），时间戳不参与 ⇒
+  //    这行没有存在意义。见头文件里那条说明。
+
+  // ⚠️ 本回调**不调 `try_publish()`**（与 `on_lidar_result` 不同），**这是有意的**：
+  //    `make_signature()` 的入参只有 `LidarResult`；其中唯一来自相机的量是它内部
+  //    `camera_color_for()` 查的那两张表（`sky_wide_` / `sky_tele_`，由
+  //    `on_sky_block` 填）—— **`CameraFrame` 本身不参与签名**。
+  //    ⇒ 在这里补帧**一帧都不会真的发出去**，却会在相机 30Hz 下白白重算 30 次签名。
+  //    （签名里那个相机颜色由**下一次雷达回调**带出去，10Hz ⇒ ≤100ms —— 见
+  //      `make_signature` ④。所以"塔被翻了"这条事件仍然进得来，只是入口在雷达侧。）
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// 通信诊断（comm_node 的输出）—— 本节点只**观测**，不自理（见头文件降级那节）
+// ═══════════════════════════════════════════════════════════════════════════════
+void PerceptionPipeline::on_comm_diag(
+    const diagnostic_msgs::msg::DiagnosticArray::SharedPtr msg)
+{
+  if (!msg) return;
+
+  // 契约：`/communication/diagnostics` 里有一条状态带 `connected` 键
+  //（发布端 `comm_node::publish_diagnostics` 的 `kv("connected", connected ? "1" : "0")`）。
+  //
+  // ⚠️ 按 **键** 找，**不是**按 `status.name`（"communication/serial"）找：
+  //    头文件 `Source::kSrcComm` 那条写的判据就是"`connected` 键"；
+  //    而 `name` 是 comm_node 的内部命名，它改名不该让本节点**静默失聪**
+  //    ——"看着配好了，实际没接上"正是 §零 第一宗旨要防的。
+  //
+  // ⚠️ 找不到 `connected` 键 ⇒ **本次不 `mark_seen`**（同相机那条的 NEVER 处理）：
+  //    宁可留 `kNever`（"未接入，不是故障"），也不替上游断言一个它没说的结论。
+  for (const auto& st : msg->status) {
+    for (const auto& kvp : st.values) {
+      if (kvp.key != "connected") continue;
+      // ⚠️ **只认 `"1"` 是健康**：`"0"` 以及任何别的取值都按不健康算。
+      //    上游将来若加档（如 `"2"`=重连中），默认落到**保守侧**而不是乐观侧 ——
+      //    链路的事，把"不知道"当"通"的代价是主控以为下位机在听。
+      mark_seen(kSrcComm, /*healthy=*/kvp.value == "1");
+      return;
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 融合层的穆斯蒂卡状态（模块 20）
+// ═══════════════════════════════════════════════════════════════════════════════
 void PerceptionPipeline::on_fusion_state(const std_msgs::msg::UInt8::SharedPtr msg)
 {
   if (!msg) return;
 
-  // ⚠️ **只认上游定义域内的三档**（`mustika_pillar_check::State`）：
-  //    0=未知 / 1=在柱上 / 5=掉落。
-  //    其余值（2=TR转运中 / 3=BR持有 / 4=已供奉 / 6=重试归还中）**它判不了** ——
-  //    收到就说明上游超出了自己的定义域。**丢弃并降级为 0**，
-  //    别把不认识的值透传给主控（主控会按那档去动作）。
-  const uint8_t v = msg->data;
-  if (v != 0u && v != 1u && v != 5u) {
-    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-      "融合状态收到定义域外的值 %u（只认 0=未知 / 1=在柱上 / 5=掉落）→ 丢弃，按未知处理。"
-      "去查 `mustika_pillar_check` 到底发了什么", static_cast<unsigned>(v));
-    return;   // ⚠️ **不更新 last_fusion_state_** —— 保留旧值，让它按超时自然变未知
+  // ⚠️⚠️ **`mark_seen` 必须排在下面那道定义域过滤之前**（2026-09-23 复核登记过这条缺陷）。
+  //    本回调要回答两个**不同**的问题：
+  //      ① "融合层这根链现在活没活" → 看 `health_[kSrcFusion]`，
+  //         判据是"**有没有消息来**"，与消息里的值合不合法**无关**；
+  //      ② "它给的穆斯蒂卡状态是什么" → 看 `last_fusion_state_`，这档才要过滤。
+  //    合并成一处（值不认识就整个 return、连 `mark_seen` 都不做）会让诊断自相矛盾：
+  //    同一张表里既写 "fusion NEVER（未接入）"、又写 "mustika_state 来自融合层"——
+  //    现场会据此**不信任一个真结论**。
+  mark_seen(kSrcFusion, /*healthy=*/true);
+
+  // ── 定义域过滤：**只认 0 / 1 / 5** ──
+  //  头文件契约：`mustika_pillar_check` 只会发这三档
+  //  （见 `msg/PerceptionFrame.msg` 的取值表：0=未知 1=柱上 5=掉落）。
+  //  其余值（2=TR转运中 / 3=BR持有 / 4=已供奉 / 6=重试归还中）**它无从判断** ——
+  //  那些要看到 TR/BR 的动作。真收到就说明上游**超出了它自己的定义域**，
+  //  而 `PerceptionFrame.mustika_state` 是主控侧 decode 的依据 ⇒
+  //  **丢弃并降级为 0**，绝不把不认识的值透传过去（透传 = 替上游断言一个它没说的事实）。
+  constexpr uint8_t kUnknown  = 0;   // 未知 —— "这条信息不可用"，不是"球不在"
+  constexpr uint8_t kOnPillar = 1;   // 在柱上
+  constexpr uint8_t kFallen   = 5;   // 球掉在地上
+  switch (msg->data) {
+    case kUnknown:
+    case kOnPillar:
+    case kFallen:
+      last_fusion_state_ = msg->data;
+      break;
+    default:
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+        "融合层给的 mustika_state=%u 超出定义域(0/1/5) → 按未知(0)处理",
+        static_cast<unsigned>(msg->data));
+      last_fusion_state_ = kUnknown;
+      break;
   }
 
-  last_fusion_state_ = v;
+  // 单调时钟（**不是** ROS 时间）：仿真里 ROS 时间会暂停/跳变，
+  // 用它算"多久没来"会得到负数或天文数字 —— 见头文件"时钟"那节。
   fusion_state_at_ = std::chrono::steady_clock::now();
 
-  // ⚠️⚠️ **必须 mark_seen**（2026-09-23 复核抓出的诊断自相矛盾）：
-  //    补调用之前，`refresh_states()` 里 kSrcFusion 那一路**没人喂时间戳** ⇒
-  //    它恒为 NEVER("未接入, 不是故障")，而同一份诊断里 `mustika_state` 却标着
-  //    "(来自融合层)" —— **同一张表里两句话互相打脸**。
-  //    现场的后果不是"少一条信息"：人会据此认定"融合层其实没起来，这个 1 是假的"，
-  //    从而**不信任一个真结论** —— 那 250 分的动作就丢在这里（§零 的"准"）。
-  //
-  //    ⚠️ healthy 给 `true`：`mustika_pillar_check` 周期发 `0=未知` 是**它的正常输出**
-  //       （"判不了"是合法结论），不是故障。新鲜度交给 `fusion_timeout_sec_` 判 ——
-  //       收到过之后停发，`refresh_states()` 会把它推成 STALE。
-  //    ⚠️ **定义域外的值不走这里**（上面已经 return）—— 与 comm 那路同口径：
-  //       宁可让它按超时变 STALE，也不拿一个读不懂的值冒充"健康"。
-  mark_seen(kSrcFusion, true);
+  // ⚠️ 本回调也**不调 `try_publish()`**：理由同相机那条 ——
+  //    `mustika_state` 不在 `make_signature()` 读的字段里（它是签名里的
+  //    `mustika_pillar_occupied`，来自**雷达**，不是这个融合状态）。
 }
 
-void PerceptionPipeline::on_comm_diag(
-    const diagnostic_msgs::msg::DiagnosticArray::SharedPtr msg)
+// ═══════════════════════════════════════════════════════════════════════════════
+// 取某个建筑位的"相机确认色"
+// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+// 【纯决策】两路相机 → 用哪个颜色（**可单测**：只吃数据，不碰 ROS）
+// ═══════════════════════════════════════════════════════════════════════════════
+bool PerceptionPipeline::choose_sky_color(const SkyColorInput& wide,
+                                         const SkyColorInput& tele,
+                                         double timeout_sec,
+                                         uint8_t& color_out,
+                                         std::string& why)
 {
-  // 从 `/communication/diagnostics` 的 `communication/serial` 里取 `connected` 键。
-  // ⚠️ 通信链路的健康**只有 comm_node 知道**（它持有串口），本节点只是**观测**：
-  //    "通信断开 → 本地缓存最新帧，重连后补发"是**它的活**（见头文件偏差表），
-  //    在感知侧再缓存一份是重复，而且两份队列的丢弃策略必然不一致。
-  for (const auto& st : msg->status) {
-    if (st.name != "communication/serial") continue;
-    for (const auto& kv : st.values) {
-      if (kv.key != "connected") continue;
-      mark_seen(kSrcComm, kv.value == "1");
-      return;   // 找到就走：一个诊断数组里这个 status 只该有一个
-    }
+  // 一路"可不可用"的判据（①②）—— 两路共用同一套，别写成两份
+  const auto usable = [&](const SkyColorInput& in, const char* name, uint8_t& col) -> bool {
+    if (!in.present) return false;
+    if (in.state != kSkyStateConfirmed) return false;      // ② COASTING 不许翻状态
+    if (in.color == kSkyColorNone || in.color == kSkyColorUnknown) return false;
+    if (!in.age_known) return false;                       // 没时间戳 ⇒ 判不了新鲜度 ⇒ 不采信
+    if (in.age_sec > timeout_sec) return false;            // ① 太旧
+    col = in.color;
+    (void)name;
+    return true;
+  };
+
+  uint8_t wide_col = 0, tele_col = 0;
+  const bool has_wide = usable(wide, "wide", wide_col);
+  const bool has_tele = usable(tele, "tele", tele_col);
+
+  if (has_tele && has_wide && tele_col != wide_col) {
+    // ⚠️⚠️ **两路打架 ⇒ 不下结论**。宁可让主控看到"颜色未知"，
+    //    也不拿一个可能就是错色去覆盖 —— 错色的代价是**把塔的归属判反**。
+    why = "宽角/长焦结论不一致（" + std::to_string(wide_col) + " vs " +
+          std::to_string(tele_col) + "）—— 保守报未知";
+    return false;
   }
-  // 话题来了但没有这两个键 → 说明 comm_node 的诊断格式变了。
-  // **不 mark_seen**：宁可让 comm 因超时变 STALE，也不要拿一个读不懂的诊断
-  // 去"证明"链路是好的（那会把真故障盖掉）。
+  if (has_tele) { color_out = tele_col; why = "长焦 CONFIRMED"; return true; }
+  if (has_wide) { color_out = wide_col; why = "宽角 CONFIRMED"; return true; }
+  why = "无 CONFIRMED 的相机颜色（或已过期）";
+  return false;
+}
+
+bool PerceptionPipeline::camera_color_for(uint32_t spot_id, uint8_t& color_out,
+                                          std::string& why) const
+{
+  // 从"每位最近一条"的表里取出这条位的两路消息，转成**纯数据**再交给纯决策函数。
+  // ⚠️ 新鲜度在这里算（要用节点的时钟 —— 那是 ROS 的东西，所以留在这一层）。
+  const auto pack = [&](const std::unordered_map<uint32_t,
+                                                br_perception::msg::CameraSkyBlock>& m) {
+    SkyColorInput in;
+    auto it = m.find(spot_id);
+    if (it == m.end()) return in;
+    in.present = true;
+    in.color   = it->second.top_color;
+    in.state   = it->second.state;
+    const rclcpp::Time t(it->second.header.stamp, this->get_clock()->get_clock_type());
+    if (!stamp_is_unset(t)) {
+      // ⚠️ 用 `this->now()`（`Node::now() const`），**不是** `this->get_clock()->now()`：
+      //    本函数是 **const 成员**，const 重载的 `get_clock()` 返回
+      //    `Clock::ConstSharedPtr`，而 `rclcpp::Clock::now()` 是**非 const** 的
+      //    （ROS_TIME 下它要更新内部状态）⇒ `discards qualifiers` 编译错。
+      //    `Node::now() const` 内部对 `clock_`（成员 shared_ptr）解引用调用，
+      //    constness 不穿透指针 ⇒ 恰好绕开这点，语义与上面 `get_clock_type()` 同一口钟。
+      in.age_known = true;
+      in.age_sec   = (this->now() - t).seconds();
+    }
+    return in;
+  };
+
+  return choose_sky_color(pack(sky_wide_), pack(sky_tele_),
+                          sky_block_timeout_sec_, color_out, why);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -643,9 +857,17 @@ PerceptionPipeline::PublishSignature PerceptionPipeline::make_signature(
   s.mode = decide_mode();
 
   // ④ 建筑位状态（**排序后比**，避免只因为顺序变化就误判成"变了"）
+  //   ⚠️ 第三项是**相机判出的顶面颜色**（不是雷达的 —— 雷达恒填 UNKNOWN）。
+  //      带上它是因为**翻转只改颜色、不改高度**（规则 3.5.8）：塔被翻时
+  //      `state` 仍是 COMPLETE_TOWER，不把颜色放进签名，这件事**一个事件都不触发**。
+  //   ⚠️ 这里**不做 TF**（`make_signature` 的取舍没变）：颜色是查表来的。
   s.spot_states.reserve(lidar.building_spots.size());
   for (const auto& sp : lidar.building_spots) {
-    s.spot_states.emplace_back(sp.spot_id, sp.state);
+    uint8_t cam_color = 0;
+    std::string why;
+    const uint8_t color = camera_color_for(sp.spot_id, cam_color, why)
+                              ? cam_color : sp.top_color;
+    s.spot_states.emplace_back(sp.spot_id, sp.state, color);
   }
   std::sort(s.spot_states.begin(), s.spot_states.end());
 
@@ -967,10 +1189,31 @@ bool PerceptionPipeline::transform_lidar_to_world(
   }
 
   // ── 建筑位 ──
+  //  ⚠️⚠️ 这里做**本节点最要紧的一次融合**（2026-09-24 加）：
+  //     雷达给"这个位上有没有塔/几块"（它对颜色无能为力，`top_color` 恒填 UNKNOWN=3），
+  //     相机给"**顶面是什么颜色**" —— 而规则 3.5.6/3.5.7 里那 40/80 分的归属
+  //     **只由顶面颜色决定**。不在这里合，主控拿到的就永远是"颜色未知"。
   out.building_spots.reserve(in.building_spots.size());
   for (const auto& s : in.building_spots) {
     br_perception::msg::BuildingSpot m = s;
     if (!to_world(s.position.x, s.position.y, s.position.z, m.position)) return false;
+
+    // ── 相机颜色覆盖（只在"相机敢下结论"时）──
+    //   ⚠️ 三条判据都在 `camera_color_for` 里（新鲜度 / CONFIRMED / 两路不打架）。
+    //   ⚠️ 覆盖的是**颜色**，不是状态：状态的来源仍是雷达。
+    uint8_t cam_color = 0;
+    std::string why;
+    if (camera_color_for(s.spot_id, cam_color, why)) {
+      m.top_color = cam_color;
+      // ⚠️ `source` 填 **FUSION(2)** 而不是 CAMERA(1)：
+      //    这个字段描述的是**这条建筑位记录**的来源，而它现在是
+      //    "状态来自雷达 + 颜色来自相机" —— 单一来源都不是实话。
+      //    （契约里 `source` 的三个取值正是为这种情况准备的。）
+      m.source = kMsgSourceFusion;
+    }
+    // ⚠️ 相机**判不出来**时，**不动** `top_color`：它保持雷达填的 UNKNOWN(3)
+    //    —— "有方块但颜色未知"是对的诚实值（`NONE` 才是"这里没有方块"）。
+
     out.building_spots.push_back(m);
   }
 

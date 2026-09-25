@@ -59,6 +59,37 @@ struct CylinderDetection {
 class CylinderDetector : public rclcpp::Node
 {
 public:
+  // ══════════════════════════════════════════════════════════════════════
+  // 纯函数 —— **static + public**，可被 `test/test_cylinder_detector.cpp` 直接调
+  // （仓库既有模式：`ClusterExtractor::filter_obstacle`、`GroundSegmenter::validate_plane_normal`）
+  //
+  // ⚠️⚠️ **按高度分两段区间，中间那条空档是刻意的**：
+  // ```
+  //   穆斯蒂卡柱  0.40 ~ 0.60 m
+  //   ─── 空档 0.60 ~ 0.70（0.1m）───   ← 这里**不分类**（留 UNKNOWN）
+  //   核心支柱    0.70 ~ 0.90 m
+  // ```
+  //    场上这两种柱的高度本来就分得开（500mm vs 800mm 级）—— 空档是留给
+  //    **测量误差与台阶边缘**的：一个"半截柱子"落在空档里，**报未知比报错好**。
+  //    ⇒ 若把空档填上（改成 `else`），**每个噪声团都会被贴上标签**。
+  //
+  // ⚠️ **区间是闭区间**（`>=` / `<=`）⇒ 恰好 0.40 / 0.60 / 0.70 / 0.90 都算在内。
+  // ⚠️ 判定顺序是 `if (穆斯蒂卡) … else if (核心)` ⇒ **两段区间重叠时穆斯蒂卡优先**
+  //    （当前默认不重叠，但参数可改 —— 顺序被单测钉住）。
+  struct HeightClassParams
+  {
+    double mustika_h_min{0.40}, mustika_h_max{0.60};
+    double core_h_min{0.70},    core_h_max{0.90};
+    /// 分类成立时把置信度**抬到**这个下界（`std::max`，**不降级**已有的更高值）
+    float  classified_confidence{0.75f};
+  };
+
+  /// @brief 按柱高贴语义标签（就地改写 `type` 与 `confidence`）
+  /// ⚠️ **落在两段区间之外的一律不动** —— `type` 保持调用前的值（通常是 `UNKNOWN`）。
+  ///    这比"猜一个最近的"安全：**报未知比报错好**。
+  [[nodiscard]] static void classify_by_height(std::vector<CylinderDetection>& cyls,
+                                               const HeightClassParams& params);
+
   using PointT      = pcl::PointNormal;       // 统一点类型: xyz + normal
   using PointCloud  = pcl::PointCloud<PointT>;
   using PointCloudPtr = PointCloud::Ptr;

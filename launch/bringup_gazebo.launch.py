@@ -11,8 +11,9 @@ Gazebo 仿真启动 — fishbot 载具 + Point-LIO (任务书 §4.1 / §十.2 �
     └─ /odom ← 车的差速插件
   /cmd_vel → 车的差速插件驱动巡游 (scripts/sim_patrol.py)
 
-前置: source /opt/ros/humble/setup.bash && source ~/lio_ws/install/setup.bash
-      && source ~/br_perception/install/setup.bash
+前置: source /opt/ros/humble/setup.bash && source ~/point_ws/install/setup.bash
+      && source ~/xinghe_ws/br_perception/install/setup.bash
+      # ⚠️ 2026-09-25 更正：原写 `~/lio_ws` / `~/br_perception` —— 两个路径都不存在。
 
 用法:
   ros2 launch br_perception bringup_gazebo.launch.py                 # GUI + 自动巡游
@@ -105,6 +106,37 @@ def generate_launch_description():
         for frame, x, y, z, r, p, y_ in SENSOR_TF
     ]
 
+    # ═══════════════════════════════════════════════════════════════════════════
+    # ⚠️⚠️ `world` 帧（2026-09-24 补）—— **感知模块的常量都在这个系里**
+    # ═══════════════════════════════════════════════════════════════════════════
+    #  为什么必须有它（而不是"仿真里没有 world 也能跑"）：
+    #    雷达节点的**每一个常量都是场地系的值** —— `l0/l1/l2_height`（0.0/0.6/0.9）、
+    #    `roi_min_z/roi_max_z`（-0.5/2.0）、`building_spot_x/y/z`（2.80 …）。
+    #    它进回调第一件事就是把点云**搬到 `world_frame`**；查不到那个系 ⇒
+    #    **全帧报 UNKNOWN**（诚实, 但仿真里就什么都验不了）。
+    #
+    #  为什么是**单位变换**（而不是 xx/yy 偏一点）：
+    #    `models/fishbot/model.sdf` 的差速插件**没写 `<odometry_source>`**，
+    #    而 `gazebo_ros_diff_drive` 的默认值是 **WORLD** ⇒ 它发的 `odom` 就是
+    #    **Gazebo 世界系里的真值位姿**（odom 帧原点 = 世界原点），且
+    #    `br_field.world` 把场地模型放在原点 ⇒ **odom ≡ world（单位变换）**。
+    #
+    #  ⚠️⚠️ 这条假设**在本机核实不了**（本机没有 ROS/插件源码）——**跑起来先验一次**：
+    #     `ros2 run tf2_ros tf2_echo odom base_link`
+    #       车静止时应看到 (0.35, 0.35, …) ← 出生位姿 = 红区 TR 启动位中心
+    #       （`field_geometry.yaml: start_zones.ours.tr = [0.35, 0.35]`，
+    #         与 `worlds/br_field.world` 的 `<pose>0.35 0.35 0.005` 同源）
+    #     · 若看到 (0,0)：说明 odom 是 **ENCODER** 源（原点在出生点）——
+    #       那就把下面的 x/y 改成 0.35/0.35（即"场地原点 - 出生点"）。
+    #     · 若想让"odom 就是世界系"这件事**不再靠假设**，可给差速插件显式加
+    #       `<odometry_source>WORLD</odometry_source>`（改 SDF，不是改这里）。
+    world_tf = Node(
+        package='tf2_ros', executable='static_transform_publisher',
+        name='static_tf_world_to_odom',
+        arguments=['--x', '0.0', '--y', '0.0', '--z', '0.0',
+                   '--roll', '0.0', '--pitch', '0.0', '--yaw', '0.0',
+                   '--frame-id', 'world', '--child-frame-id', 'odom'])
+
     # PointCloud2 → CustomMsg 桥接 (仿真雷达 → Point-LIO 的 Livox 通路)
     bridge = Node(
         package='br_perception', executable='pointcloud2_to_livox_custom',
@@ -120,7 +152,8 @@ def generate_launch_description():
                      'elev_min_deg': -14.9,
                      'elev_max_deg': 14.9}])
 
-    # Point-LIO (仿真配置; 参数覆盖与 lio_ws 的 mapping_mid360.launch.py 保持一致)
+    # Point-LIO (仿真配置; 参数覆盖与 point_ws 的 `point_lio.launch.py` + `config/mid360.yaml` 保持一致)
+    # ⚠️ 2026-09-25：原注释引的 `mapping_mid360.launch.py` **不存在**，真名 `point_lio.launch.py`。
     point_lio = Node(
         package='point_lio', executable='pointlio_mapping', name='laserMapping',
         output='screen',
@@ -154,6 +187,7 @@ def generate_launch_description():
         LogInfo(msg="[br_perception] Gazebo 仿真启动 — fishbot 载具 + Point-LIO (CustomMsg 桥接)"),
         set_model_path,
         *static_tfs,
+        world_tf,
         gzserver,
         gzclient,
         bridge,

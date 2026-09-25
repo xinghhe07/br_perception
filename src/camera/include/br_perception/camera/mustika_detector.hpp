@@ -102,6 +102,94 @@ struct MustikaImageResult
 class MustikaDetector : public rclcpp::Node
 {
 public:
+  struct HsvGroup {
+    cv::Scalar lower;
+    cv::Scalar upper;
+  };
+
+  // ═════════════════════════════════════════════════════════════════════════════
+  // 纯函数契约（2026-09-25 加，为单测而摘）
+  //
+  // ⚠️ 摘成 `static + Params` 是为了让**判定逻辑能被单测直接喂**（仓库既有模式：
+  //    `SkyBlockDetector::judge_top_color`、`ClusterExtractor::filter_obstacle`）。
+  // ⚠️⚠️ **原成员函数保留为薄包装**（把成员变量打包成 `MustikaParams` 传进去）
+  //    ⇒ **节点行为逐位不变**，调用点一处不改。
+  //
+  // ⚠️ **为什么这个模块最需要单测**：它出的是**那 250 分**那条链的输入
+  //    （`mustika_pillar_check` 拿它检出的球去做"在柱上吗"的判定）。
+  //    而它的三个关键阈值 **2026-09-20 改过值**（半径 0.065→0.105、
+  //    圆形度 0.85→0.70、黄底占比 0.60→0.50）—— 台账 P1-9 原话是
+  //    「**需重编重测**」。下面的用例就是"重测"。
+  // ═════════════════════════════════════════════════════════════════════════════
+
+  /// 一个 HSV 阈值组（金色是**多组取并集**）
+  /// ⚠️ 定义在下面（原在 private 段，2026-09-25 挪到 public —— `MustikaParams` 是
+  ///    公开结构体，它引用私有嵌套类型会让外部无法使用）。
+
+  /// 检测参数（**名字与 `config/camera_params.yaml` 的键一致**）
+  struct MustikaParams {
+    /// 金色阈值组（**并集**）—— 来自 `color_thresholds.yaml` 的 `yellow_ball`
+    std::vector<HsvGroup> golden_groups;
+
+    // ── 形态学 ──
+    int    morph_close_kernel{5};
+    int    morph_close_iters{2};
+
+    // ── HoughCircles ──
+    double hough_dp{1.0};
+    double hough_min_dist{30.0};
+    double hough_param1{100.0};
+    double hough_param2{30.0};
+    int    hough_min_radius{10};
+    int    hough_max_radius{150};
+
+    // ── 验证 ──
+    /// ⚠️ 圆内金像素占比下限（**2026-09-20 由 0.60 改到 0.50**）
+    double min_golden_ratio{0.50};
+    /// ⚠️ 圆形度下限（**2026-09-20 由 0.85 改到 0.70**）
+    double min_circularity{0.70};
+
+    // ── 兜底轮廓 ──
+    int    contour_min_area{50};
+    double contour_min_golden_ratio{0.40};
+
+    // ── 距离 / 尺寸（用来把像素半径换算成"可能多远"）──
+    double focal_length_px{600.0};
+    /// ⚠️ 穆斯蒂卡真实半径 (m) —— **2026-09-20 由 0.065 改到 0.105**
+    ///    （实物是 Mikasa V300W 排球，**直径 210mm** ⇒ 半径 0.105）
+    double mustika_real_radius{0.105};
+    double min_distance{0.2};
+    double max_distance{3.0};
+  };
+
+  /// @brief 金色区域二值 mask（HSV 阈值并集 + 形态学闭运算）
+  /// @param bgr  输入 BGR（**CV_8UC3**；空图/非法通道数 ⇒ 输出全零 mask，不抛）
+  /// @param mask 输出 CV_8UC1，255 = 金色
+  ///
+  /// ⚠️ `morph_close_iters <= 0` ⇒ **跳过闭运算**（不是"跑 0 次"的等价写法 ——
+  ///    OpenCV 对 `iterations = 0` 的行为是"不迭代"，两条路结果一样但显式跳过更清楚）。
+  static void extract_golden_mask(const cv::Mat& bgr, cv::Mat& mask,
+                                  const MustikaParams& params);
+
+  /// @brief 验证一个候选圆是不是穆斯蒂卡球
+  /// @param result ⚠️ **仅成功时填入**；任何一条判据不过就 `return false` **早退**，
+  ///               `result` **一个字段都不碰**（保持调用前的值）⇒ 调用方**必须以返回值为准**。
+  ///
+  /// ⚠️⚠️ **半径判据是"两套来源取交集"**（头文件早就标注了这个陷阱）：
+  /// ```
+  ///   eff_min = max(hough_min_radius, r_min_by_dist / 2)
+  ///   eff_max = min(hough_max_radius, r_max_by_dist * 2)
+  /// ```
+  ///    ⇒ `hough_max_radius` 若配小，会**把按距离算对的上界夹回去**，
+  ///      而症状是"**明明在可见距离内的球检不出来**" —— 不报错。
+  ///    ⚠️ 单测专门钉这条（见 `test_mustika_detector.cpp`）。
+  static bool validate_circle(const cv::Mat& bgr, const cv::Mat& mask,
+                              const cv::Vec3f& circle, MustikaImageResult& result,
+                              const MustikaParams& params);
+
+  /// @brief 把当前成员参数打包成 `MustikaParams`（**薄包装用**）
+  [[nodiscard]] MustikaParams make_params() const;
+
   explicit MustikaDetector(const rclcpp::NodeOptions& options = rclcpp::NodeOptions());
 
 private:
@@ -205,10 +293,6 @@ private:
   // ═════════════════════════════════════════════════════════════════════════════
   // HSV 金色阈值 (从 color_thresholds.yaml 加载)
   // ═════════════════════════════════════════════════════════════════════════════
-  struct HsvGroup {
-    cv::Scalar lower;
-    cv::Scalar upper;
-  };
   // ⚠️ 线程安全（2026-09-20 核实并写明 —— 之前是缺口）
   //    `golden_groups_` **只在构造函数里写一次**（从 color_yaml_path_ 加载），
   //    之后只被 extract_golden_mask() 读。on_parameter_change() 覆盖的 10 个

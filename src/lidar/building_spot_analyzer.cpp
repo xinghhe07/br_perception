@@ -4,6 +4,13 @@
 #include <pcl/filters/crop_box.h>
 #include <cmath>
 
+// ⚠️ TF：把输入点云整份搬到**场地系**（坐标系纪律见头文件）。
+//    ⚠️ 只用 `lookupTransform` + 自己组 `Eigen::Affine3f` ⇒ **不需要 `tf2_geometry_msgs`**
+//       （那个包是为 `Buffer::transform<PointStamped>` 的重载准备的，这里不走那条路）。
+#include <tf2/exceptions.h>
+#include <tf2/time.h>
+#include <pcl/common/transforms.h>
+
 
 namespace br_perception {                                            //有助于组织代码，避免与其他库与或模块发生冲突
 namespace lidar {
@@ -14,10 +21,14 @@ namespace lidar {
 namespace {
 const char* spot_status_name(BuildingSpotStatus s) {
   switch (s) {                                                               // 根据传入状态s  返回对应字符串描述
+    case BuildingSpotStatus::EMPTY:          return "Empty";
     case BuildingSpotStatus::ONE_EARTH:      return "One Earth";
     case BuildingSpotStatus::TWO_EARTH:      return "Two Earth";
     case BuildingSpotStatus::COMPLETE_TOWER: return "Complete Tower";
-    default:                                  return "Empty";
+    // ⚠️ **不能落进 `default` 印成 "Empty"** —— 那正是"用 0 冒充未知"的同一个错：
+    //    现场看诊断的人会把"没量成"读成"这个位是空的"。
+    case BuildingSpotStatus::UNKNOWN:        return "**UNKNOWN(没量成)**";
+    default:                                  return "??(未定义的 status)";
   }
 }
 }  // anonymous namespace
@@ -25,6 +36,72 @@ const char* spot_status_name(BuildingSpotStatus s) {
 // ═══════════════════════════════════════════════════════════════════════════
 // 构造 & 参数初始化
 // ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
+// 点云 → 场地系（坐标系纪律见头文件；2026-09-24 立）
+//
+// ⚠️ 方向是**整份点云一次性搬过来**，不是"每个位各变换一次"：
+//    本模块的常量全是场地系的值（位坐标、平台高、各高度阈值），
+//    把**测量**搬到常量的系里做，比把常量拆到测量系里更少出错面。
+// ⚠️⚠️ **不做这一步的后果**：`CropBox` 拿场地系坐标去裁雷达系的点云 ⇒
+//    机器人不在场原点/朝向不一时**裁到错地方** ⇒ 裁不到点 ⇒ 报 EMPTY
+//    ⇒ **主控以为塔没建**。而它在"台架原点静止"时**完全看不出**（两个系恰好重合）。
+// ═══════════════════════════════════════════════════════════════════════════
+bool BuildingSpotAnalyzer::cloud_to_world(const PointCloudPtr& in,
+                                         const std_msgs::msg::Header& hdr,
+                                         PointCloudPtr& out)
+{
+  // 没配场地系（或配成空串）= 明确"不做变换"模式 ⇒ 原样透传
+  if (world_frame_.empty()) { out = in; return true; }
+  if (hdr.frame_id.empty()) return false;          // ⚠️ 无从变换就**别猜**
+  if (hdr.frame_id == world_frame_) { out = in; return true; }   // 上游已换好
+  if (!tf_buffer_) return false;
+
+  geometry_msgs::msg::TransformStamped tf_msg;
+  try {
+    tf_msg = tf_buffer_->lookupTransform(
+        world_frame_, hdr.frame_id, hdr.stamp,
+        tf2::durationFromSec(tf_timeout_sec_));
+  } catch (const tf2::TransformException&) {
+    return false;                                   // 不回落、不猜 → 调用方报 UNKNOWN
+  }
+
+  const auto& t = tf_msg.transform.translation;
+  const auto& q = tf_msg.transform.rotation;
+  Eigen::Affine3f T = Eigen::Affine3f::Identity();
+  T.translate(Eigen::Vector3f(static_cast<float>(t.x),
+                              static_cast<float>(t.y),
+                              static_cast<float>(t.z)));
+  T.rotate(Eigen::Quaternionf(static_cast<float>(q.w), static_cast<float>(q.x),
+                             static_cast<float>(q.y), static_cast<float>(q.z)));
+
+  out = std::make_shared<PointCloud>();
+  pcl::transformPointCloud(*in, *out, T);
+  return true;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 一帧全报 UNKNOWN
+// ═══════════════════════════════════════════════════════════════════════════
+void BuildingSpotAnalyzer::publish_all_unknown(const std_msgs::msg::Header& header)
+{
+  std::vector<BuildingSpot> spots;
+  spots.reserve(building_positions_.size());
+  for (size_t i = 0; i < building_positions_.size(); ++i) {
+    BuildingSpot spot;
+    spot.id         = static_cast<int>(i);
+    spot.spot_x     = static_cast<float>(building_positions_[i].first);
+    spot.spot_y     = static_cast<float>(building_positions_[i].second);
+    spot.platform_z = spot_platform_z(i);
+    // ⚠️⚠️ **UNKNOWN，不是 EMPTY** —— 这一行就是本文件最要紧的一个字。
+    spot.status     = BuildingSpotStatus::UNKNOWN;
+    spot.height     = 0.0f;      // 没量 → 0；⚠️ 别拿它当"高度是 0"
+    spot.point_count = 0;
+    spots.push_back(spot);
+  }
+  publish_spots(spots, header);
+  publish_diagnostics(0.0, spots);
+}
+
 BuildingSpotAnalyzer::BuildingSpotAnalyzer(const rclcpp::NodeOptions& options)
   : Node("building_spot_analyzer", options)                                           //create_publisher<MessageT>(topic, qos, options) QoS（服务质量）——“通信协议/合同  选项（PublisherOptions）——“发布者的系统配置/管理”
 {
@@ -53,6 +130,10 @@ BuildingSpotAnalyzer::BuildingSpotAnalyzer(const rclcpp::NodeOptions& options)
   this->declare_parameter<double>("complete_tower_min",   complete_tower_min_);
   this->declare_parameter<double>("complete_tower_max",   complete_tower_max_);
 
+  // ── 坐标系（2026-09-24 新增；⚠️ 名字必须与融合层的 fusion_params.yaml 一致）──
+  this->declare_parameter<std::string>("world_frame", world_frame_);
+  this->declare_parameter<double>("tf_timeout_sec",   tf_timeout_sec_);
+
   // ── 读取参数 ──
   #define GET(name, var) this->get_parameter(name, var)                   //C 预处理器宏，在编译前直接把代码里的 GET(name, var) 原封不动地替换为 this->get_parameter(name, var)
   GET("platform_z",            platform_z_);
@@ -69,6 +150,8 @@ BuildingSpotAnalyzer::BuildingSpotAnalyzer(const rclcpp::NodeOptions& options)
   GET("two_earth_max",         two_earth_max_);
   GET("complete_tower_min",    complete_tower_min_);
   GET("complete_tower_max",    complete_tower_max_);
+  GET("world_frame",           world_frame_);
+  GET("tf_timeout_sec",        tf_timeout_sec_);
   #undef GET                                                             // #undef 是 C/C++ 预处理器指令，用于取消定义一个宏 C++ 程序员讲究“命名空间隔离”和“避免污染
 
   // 建筑位坐标: 从两个独立数组重建为 pair 向量 (避免越界)    #参数服务器读取成对的 X/Y 坐标点，检查错误，并填充类成员容器
@@ -103,6 +186,12 @@ BuildingSpotAnalyzer::BuildingSpotAnalyzer(const rclcpp::NodeOptions& options)
   // ── 动态参数回调 ──                                                                #std::bind(...)：将类成员函数 on_param_change 绑定到当前对象（this）
   param_cb_handle_ = this->add_on_set_parameters_callback(                             //std::placeholders::_1：占位符，代表回调函数将会收到的第一个参数（即 std::vector<rclcpp::Parameter> 变更列表）。
     std::bind(&BuildingSpotAnalyzer::on_param_change, this, std::placeholders::_1));  //param_cb_handle_：返回的句柄（Handle）。用于后续可以随时注销该回调（比如在析构函数中 reset() 掉），防止节点销毁后回调还在触发导致崩溃
+
+  // ── TF：**只读**（把点云搬到场地系；见头文件「坐标系纪律」）──
+  //    ⚠️ 不链接 `fusion::CoordinateTransformer`：那会让雷达层反向依赖融合层，
+  //       而且它构造时会**无条件广播** TF（多一个广播者就撞 TF_REPEATED_DATA）。
+  tf_buffer_   = std::make_unique<tf2_ros::Buffer>(this->get_clock());
+  tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
   // ── 订阅: 非地面点云 ──
   sub_cloud_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
@@ -152,6 +241,24 @@ void BuildingSpotAnalyzer::cloud_callback(
     RCLCPP_ERROR(this->get_logger(), "pcl::fromROSMsg unknown exception");
     return;
   }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // [0] **搬到场地系** —— 本模块所有常量（位坐标/平台高/高度阈值）都是场地系的值
+  //     ⚠️ 换不成 ⇒ **报 UNKNOWN，不许当成"空位"**（两件事的动作完全不同）
+  //     ⚠️ 注意: 本节点吃的是 `/perception/lidar/non_ground` —— 若上游是
+  //        `lidar_perception_node`，那份点云**已经换好了**，这里会走透传分支。
+  // ═══════════════════════════════════════════════════════════════════════
+  PointCloudPtr world_cloud;
+  if (!cloud_to_world(cloud_in, msg->header, world_cloud)) {
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+      "**点云换不到场地系 '%s'**（输入 frame_id='%s'）⇒ 本帧全部建筑位报 UNKNOWN。"
+      "⚠️ 常见原因: ① 没人广播 world→odom（`perception_pipeline` 没起）；"
+      "② 上游还没换系；③ `world_frame` 参数与 TF 树上的名字不符",
+      world_frame_.c_str(), msg->header.frame_id.c_str());
+    publish_all_unknown(msg->header);
+    return;
+  }
+  cloud_in = world_cloud;      // 之后全流程只认场地系
 
   const size_t input_pts = cloud_in->size();
 
@@ -495,7 +602,7 @@ void BuildingSpotAnalyzer::publish_diagnostics(
   add("total_ms",      total_ms);
   add("spot_count",    static_cast<double>(spots.size()));
 
-  int empty_cnt = 0, one_cnt = 0, two_cnt = 0, complete_cnt = 0;
+  int empty_cnt = 0, one_cnt = 0, two_cnt = 0, complete_cnt = 0, unknown_cnt = 0;
   int visual_check_needed = 0;
   for (const auto& s : spots) {
     switch (s.status) {
@@ -503,6 +610,9 @@ void BuildingSpotAnalyzer::publish_diagnostics(
       case BuildingSpotStatus::ONE_EARTH:      one_cnt++;      break;
       case BuildingSpotStatus::TWO_EARTH:      two_cnt++;      break;
       case BuildingSpotStatus::COMPLETE_TOWER: complete_cnt++; break;
+      // ⚠️ **单独一档**：`unknown` 涨 = "没量成"（TF 不可用等），与"真量到是空的"
+      //    是两件事 —— 现场的读法完全不同（见 `BuildingSpotStatus::UNKNOWN`）。
+      case BuildingSpotStatus::UNKNOWN:        unknown_cnt++;  break;
     }
     if (s.needs_visual_check) visual_check_needed++;
   }
@@ -511,6 +621,8 @@ void BuildingSpotAnalyzer::publish_diagnostics(
   add("one_earth",      static_cast<double>(one_cnt));
   add("two_earth",      static_cast<double>(two_cnt));
   add("complete_tower", static_cast<double>(complete_cnt));
+  // ⚠️ 与 `empty_spots` **必须分开读**（见 `BuildingSpotStatus::UNKNOWN`）
+  add("unknown_spots",  static_cast<double>(unknown_cnt));
   add("visual_check_needed", static_cast<double>(visual_check_needed));
 
   arr.status.push_back(st);

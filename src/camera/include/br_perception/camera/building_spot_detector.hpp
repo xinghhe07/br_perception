@@ -76,6 +76,33 @@ struct BuildingSpotImageResult
 class BuildingSpotDetector : public rclcpp::Node
 {
 public:
+  // ═════════════════════════════════════════════════════════════════════════════
+  // 纯函数：**四边形的几何验证**（2026-09-25 摘出来，为单测）
+  //
+  // ⚠️ 它们判的是"检出的四边形**是不是一个矩形**"——
+  //    即"这团绿色**是不是一个建筑位**"。判错了**不报错**：
+  //      · 太松 ⇒ 把绿色杂物也当成建筑位（**多报位**）
+  //      · 太紧 ⇒ 真建筑位在斜视角下被拒（**漏报位**）
+  //    而建筑位是那 40/80 分判色的**投影锚点**（位坐标 → 图像 ROI）。
+  // ═════════════════════════════════════════════════════════════════════════════
+
+  /// @brief 内角验证：四个角都要接近 90°
+  /// @param angle_score **输出**：0(全偏 30°) ~ 1(全是直角)
+  /// @param min_angle_score 评分下限
+  ///
+  /// ⚠️ **两层判据**：① 任一角偏离 90° 超过 **30°** ⇒ **硬拒**（直接 return false，
+  ///    不看评分）；② 四角评分的**均值** >= `min_angle_score`。
+  /// ⚠️ 边界**非严格**（`>=`）：评分恰好等于下限 ⇒ **通过**。
+  static bool validate_angles(const std::vector<cv::Point>& quad, float& angle_score,
+                              double min_angle_score);
+
+  /// @brief 对边验证：两组对边**应平行**且**长度接近**
+  /// @param side_score **输出**：`0.6×平行度 + 0.4×长度比`
+  /// @param min_side_score 评分下限（**非严格 `>=`**）
+  /// ⚠️ 某条边长为 0 ⇒ 直接拒（`edge_vec` 返回 (0,0) 时那条直接 return false）
+  static bool validate_opposite_sides(const std::vector<cv::Point>& quad, float& side_score,
+                                      double min_side_score);
+
   explicit BuildingSpotDetector(const rclcpp::NodeOptions& options = rclcpp::NodeOptions());
 
 private:

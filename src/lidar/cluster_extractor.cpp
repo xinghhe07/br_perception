@@ -41,50 +41,52 @@ const char* obstacle_type_name(ObstacleType t) {
 ClusterExtractor::ClusterExtractor(const rclcpp::NodeOptions& options)
   : Node("cluster_extractor", options)
 {
+  // ⚠️ 声明与读取都走 `params_` —— 它是本模块参数的**唯一事实源**。
+  //    三方一致（yaml 键名 = Params 字段名 = 这里的字面量）由同一行的两处引用保证。
   // ── 声明聚类参数 ──
-  this->declare_parameter<double>("cluster_tolerance",    cluster_tolerance_);
-  this->declare_parameter<int>("min_cluster_size",        min_cluster_size_);
-  this->declare_parameter<int>("max_cluster_size",        max_cluster_size_);
+  this->declare_parameter<double>("cluster_tolerance",    params_.cluster_tolerance);
+  this->declare_parameter<int>("min_cluster_size",        params_.min_cluster_size);
+  this->declare_parameter<int>("max_cluster_size",        params_.max_cluster_size);
 
   // ── 声明过滤参数 ──
-  this->declare_parameter<double>("max_object_size",      max_object_size_);
-  this->declare_parameter<double>("max_object_height",    max_object_height_);
-  this->declare_parameter<int>("min_object_points",       min_object_points_);
-  this->declare_parameter<double>("floating_z_min",       floating_z_min_);
+  this->declare_parameter<double>("max_object_size",      params_.max_object_size);
+  this->declare_parameter<double>("max_object_height",    params_.max_object_height);
+  this->declare_parameter<int>("min_object_points",       params_.min_object_points);
+  this->declare_parameter<double>("floating_z_min",       params_.floating_z_min);
 
   // ── 声明圆柱掩膜参数 ──
-  this->declare_parameter<bool>("enable_cylinder_mask",   enable_cylinder_mask_);
-  this->declare_parameter<double>("cylinder_mask_radius", cylinder_mask_radius_);
+  this->declare_parameter<bool>("enable_cylinder_mask",   params_.enable_cylinder_mask);
+  this->declare_parameter<double>("cylinder_mask_radius", params_.cylinder_mask_radius);
   this->declare_parameter<std::vector<double>>("cylinder_mask_x");
   this->declare_parameter<std::vector<double>>("cylinder_mask_y");
 
   // ── 声明分类参数 ──
-  this->declare_parameter<double>("size_tolerance",       size_tolerance_);
-  this->declare_parameter<double>("earth_cube_size",      earth_cube_size_);
-  this->declare_parameter<double>("sky_cube_size",        sky_cube_size_);
-  this->declare_parameter<double>("enemy_robot_size",     enemy_robot_size_);
-  this->declare_parameter<double>("mustika_size",         mustika_size_);
-  this->declare_parameter<double>("elongation_ratio",     elongation_ratio_);
-  this->declare_parameter<double>("sphere_eigen_tol",     sphere_eigen_tol_);
+  this->declare_parameter<double>("size_tolerance",       params_.size_tolerance);
+  this->declare_parameter<double>("earth_cube_size",      params_.earth_cube_size);
+  this->declare_parameter<double>("sky_cube_size",        params_.sky_cube_size);
+  this->declare_parameter<double>("enemy_robot_size",     params_.enemy_robot_size);
+  this->declare_parameter<double>("mustika_size",         params_.mustika_size);
+  this->declare_parameter<double>("elongation_ratio",     params_.elongation_ratio);
+  this->declare_parameter<double>("sphere_eigen_tol",     params_.sphere_eigen_tol);
 
   // ── 读取参数 ──
   #define GET(name, var) this->get_parameter(name, var)
-  GET("cluster_tolerance",    cluster_tolerance_);
-  GET("min_cluster_size",     min_cluster_size_);
-  GET("max_cluster_size",     max_cluster_size_);
-  GET("max_object_size",      max_object_size_);
-  GET("max_object_height",    max_object_height_);
-  GET("min_object_points",    min_object_points_);
-  GET("floating_z_min",       floating_z_min_);
-  GET("enable_cylinder_mask", enable_cylinder_mask_);
-  GET("cylinder_mask_radius", cylinder_mask_radius_);
-  GET("size_tolerance",       size_tolerance_);
-  GET("earth_cube_size",      earth_cube_size_);
-  GET("sky_cube_size",        sky_cube_size_);
-  GET("enemy_robot_size",     enemy_robot_size_);
-  GET("mustika_size",         mustika_size_);
-  GET("elongation_ratio",     elongation_ratio_);
-  GET("sphere_eigen_tol",     sphere_eigen_tol_);
+  GET("cluster_tolerance",    params_.cluster_tolerance);
+  GET("min_cluster_size",     params_.min_cluster_size);
+  GET("max_cluster_size",     params_.max_cluster_size);
+  GET("max_object_size",      params_.max_object_size);
+  GET("max_object_height",    params_.max_object_height);
+  GET("min_object_points",    params_.min_object_points);
+  GET("floating_z_min",       params_.floating_z_min);
+  GET("enable_cylinder_mask", params_.enable_cylinder_mask);
+  GET("cylinder_mask_radius", params_.cylinder_mask_radius);
+  GET("size_tolerance",       params_.size_tolerance);
+  GET("earth_cube_size",      params_.earth_cube_size);
+  GET("sky_cube_size",        params_.sky_cube_size);
+  GET("enemy_robot_size",     params_.enemy_robot_size);
+  GET("mustika_size",         params_.mustika_size);
+  GET("elongation_ratio",     params_.elongation_ratio);
+  GET("sphere_eigen_tol",     params_.sphere_eigen_tol);
   #undef GET
 
   // 圆柱中心列表: 从两个独立数组重建为 pair 向量 (避免越界)
@@ -97,11 +99,11 @@ ClusterExtractor::ClusterExtractor(const rclcpp::NodeOptions& options)
         "cylinder_mask_x (%zu) and cylinder_mask_y (%zu) length mismatch; "
         "cylinder mask disabled",
         cx.size(), cy.size());
-      enable_cylinder_mask_ = false;
+      params_.enable_cylinder_mask = false;
     } else {
-      cylinder_centers_.reserve(cx.size());
+      params_.cylinder_centers.reserve(cx.size());
       for (size_t i = 0; i < cx.size(); ++i) {
-        cylinder_centers_.emplace_back(cx[i], cy[i]);
+        params_.cylinder_centers.emplace_back(cx[i], cy[i]);
       }
     }
   }
@@ -128,12 +130,13 @@ ClusterExtractor::ClusterExtractor(const rclcpp::NodeOptions& options)
     "filter: max_size=%.2fm max_h=%.2fm min_pts=%d floating_z=%.2fm | "
     "cylinder_mask: %s radius=%.2fm centers=%zu | "
     "classify: tol=%.3fm earth=%.2f sky=%.2f robot=%.2f mustika=%.2f",
-    cluster_tolerance_, min_cluster_size_, max_cluster_size_,
-    max_object_size_, max_object_height_, min_object_points_, floating_z_min_,
-    enable_cylinder_mask_ ? "ON" : "OFF",
-    cylinder_mask_radius_, cylinder_centers_.size(),
-    size_tolerance_, earth_cube_size_, sky_cube_size_,
-    enemy_robot_size_, mustika_size_);
+    params_.cluster_tolerance, params_.min_cluster_size, params_.max_cluster_size,
+    params_.max_object_size, params_.max_object_height, params_.min_object_points,
+    params_.floating_z_min,
+    params_.enable_cylinder_mask ? "ON" : "OFF",
+    params_.cylinder_mask_radius, params_.cylinder_centers.size(),
+    params_.size_tolerance, params_.earth_cube_size, params_.sky_cube_size,
+    params_.enemy_robot_size, params_.mustika_size);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -148,7 +151,7 @@ void ClusterExtractor::cloud_callback(
   PointCloudPtr cloud_in = std::make_shared<PointCloud>();
   pcl::fromROSMsg(*msg, *cloud_in);
 
-  if (cloud_in->size() < static_cast<size_t>(min_cluster_size_)) {
+  if (cloud_in->size() < static_cast<size_t>(params_.min_cluster_size)) {
     RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(),
                          3000, "Too few non-ground points: %zu", cloud_in->size());
     // 即使无有效数据也发布空结果, 避免下游等待超时
@@ -160,7 +163,7 @@ void ClusterExtractor::cloud_callback(
 
   // ── 1. 圆柱掩膜 (可选) ──
   PointCloudPtr cloud_work = cloud_in;
-  if (enable_cylinder_mask_ && !cylinder_centers_.empty()) {
+  if (params_.enable_cylinder_mask && !params_.cylinder_centers.empty()) {
     cloud_work = mask_cylinders(cloud_in);
   }
 
@@ -210,11 +213,12 @@ void ClusterExtractor::cloud_callback(
 // 欧式聚类
 // ═══════════════════════════════════════════════════════════════════════════
 std::vector<pcl::PointIndices>
-ClusterExtractor::extract_clusters(const PointCloudPtr& cloud)
+ClusterExtractor::extract_clusters(const PointCloudPtr& cloud,
+                                   const Params& params)
 {
   std::vector<pcl::PointIndices> clusters;
 
-  if (cloud->size() < static_cast<size_t>(min_cluster_size_)) {
+  if (cloud->size() < static_cast<size_t>(params.min_cluster_size)) {
     return clusters;
   }
 
@@ -223,25 +227,37 @@ ClusterExtractor::extract_clusters(const PointCloudPtr& cloud)
   tree->setInputCloud(cloud);
 
   pcl::EuclideanClusterExtraction<pcl::PointXYZ> ec;
-  ec.setClusterTolerance(cluster_tolerance_);
-  ec.setMinClusterSize(min_cluster_size_);
-  ec.setMaxClusterSize(max_cluster_size_);
+  // ⚠️ PCL 的这三个 setter 收的是 `double` / `int`：`min/max_cluster_size` 在
+  //    `Params` 里就是 `int`，别顺手改成 `size_t`（会多一次窄化警告）。
+  ec.setClusterTolerance(params.cluster_tolerance);
+  ec.setMinClusterSize(params.min_cluster_size);
+  ec.setMaxClusterSize(params.max_cluster_size);
   ec.setSearchMethod(tree);
   ec.setInputCloud(cloud);
 
+  // ⚠️ static 函数拿不到 `this->get_logger()` ⇒ 用同名静态 logger。
+  //    这里是 ERROR 级，单测里**会**打到 stderr —— 但只有真抛异常才会走到。
+  static const rclcpp::Logger kLogger = rclcpp::get_logger("cluster_extractor");
   try {
     ec.extract(clusters);
   }
   catch (const std::exception& e) {
-    RCLCPP_ERROR(this->get_logger(),
+    RCLCPP_ERROR(kLogger,
       "EuclideanClusterExtraction exception: %s", e.what());
   }
   catch (...) {
-    RCLCPP_ERROR(this->get_logger(),
+    RCLCPP_ERROR(kLogger,
       "EuclideanClusterExtraction unknown exception");
   }
 
   return clusters;
+}
+
+// ── 成员薄包装：把唯一事实源 `params_` 传进去（回调走这条）──
+std::vector<pcl::PointIndices>
+ClusterExtractor::extract_clusters(const PointCloudPtr& cloud)
+{
+  return extract_clusters(cloud, params_);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -250,7 +266,8 @@ ClusterExtractor::extract_clusters(const PointCloudPtr& cloud)
 Obstacle ClusterExtractor::compute_obstacle(
     const PointCloudPtr& cloud,
     const pcl::PointIndices& cluster,
-    int id)
+    int id,
+    const Params& params)
 {
   Obstacle obs;
   obs.id = id;
@@ -294,9 +311,18 @@ Obstacle ClusterExtractor::compute_obstacle(
   obs.point_count = static_cast<int>(indices.size());
 
   // ── PCA 方向 ──
-  compute_pca_orientation(cloud, cluster, obs);
+  compute_pca_orientation(cloud, cluster, obs, params);
 
   return obs;
+}
+
+// ── 成员薄包装 ──
+Obstacle ClusterExtractor::compute_obstacle(
+    const PointCloudPtr& cloud,
+    const pcl::PointIndices& cluster,
+    int id)
+{
+  return compute_obstacle(cloud, cluster, id, params_);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -314,11 +340,14 @@ Obstacle ClusterExtractor::compute_obstacle(
 void ClusterExtractor::compute_pca_orientation(
     const PointCloudPtr& cloud,
     const pcl::PointIndices& cluster,
-    Obstacle& obs)
+    Obstacle& obs,
+    const Params& params)
 {
   const auto& indices = cluster.indices;
   const size_t n = indices.size();
 
+  // ⚠️ `n < 3` 时**不是**把比值填 0 —— 填 0 会让 `classify_obstacle` 的球体判据
+  //    `ratio > 0` 直接判假（"没算出来"被当成"不是球"）。填 1.0 才是"各向同性"。
   if (n < 3) {
     obs.yaw = 0;
     obs.is_elongated = false;
@@ -327,12 +356,26 @@ void ClusterExtractor::compute_pca_orientation(
     return;
   }
 
+  // ── 质心：**自己算**，不依赖调用方先填 `obs.centroid_*` ──
+  // ⚠️ 2026-09-25 修：原实现直接取 `obs.centroid_x/y/z` ⇒ **调用方不先填质心，
+  //    PCA 就会静默地绕原点求协方差**，算出一组"看着合理"的错特征值与错主轴
+  //    （不报错、不抛异常）。`compute_obstacle` 恰好先填了质心，所以节点路径一直是对的；
+  //    但本函数现在是 `public static`、可以被单独调用 ⇒ 这个隐含前提就是个陷阱。
+  //    改成自给自足。用 double 累加（比 `compute_obstacle` 的 float 质心更准，差 ~1e-7）。
+  double cx = 0.0, cy = 0.0, cz = 0.0;
+  for (int idx : indices) {
+    const auto& pt = cloud->points[idx];
+    cx += static_cast<double>(pt.x);
+    cy += static_cast<double>(pt.y);
+    cz += static_cast<double>(pt.z);
+  }
+  const double inv_n = 1.0 / static_cast<double>(n);
+  cx *= inv_n;
+  cy *= inv_n;
+  cz *= inv_n;
+
   // ── 协方差矩阵 (3×3) ──
   double cov[3][3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}};
-  const double cx = static_cast<double>(obs.centroid_x);
-  const double cy = static_cast<double>(obs.centroid_y);
-  const double cz = static_cast<double>(obs.centroid_z);
-  const double inv_n = 1.0 / static_cast<double>(n);
 
   for (int idx : indices) {
     const auto& pt = cloud->points[idx];
@@ -379,50 +422,71 @@ void ClusterExtractor::compute_pca_orientation(
     ? static_cast<float>(lambda2 / lambda3) : 1.0f;
 
   // ── 判断是否长条形 ──
-  obs.is_elongated = (obs.eigen_ratio_1 > elongation_ratio_);
+  // ⚠️ 严格大于：恰好等于 `elongation_ratio` 时**不算** elongated。
+  obs.is_elongated = (obs.eigen_ratio_1 > params.elongation_ratio);
 
   // ── 偏航角 (主轴水平分量) ──
+  // ⚠️ 主轴的**正负号有二义性**：`v1` 与 `−v1` 都是合法特征向量，Eigen 取哪个
+  //    取决于内部 LAPACK 的符号约定。⇒ `yaw` 只在**模 π** 意义下有意义
+  //    （差 180° 的两条直线方向相同，对外框、对分类都没有影响）。
+  //    单测断言必须按"模 π 相等"写，否则会写出一个随 Eigen 版本飘的用例。
   obs.yaw = std::atan2(static_cast<float>(v1.y()),
                        static_cast<float>(v1.x()));
+}
+
+// ── 成员薄包装 ──
+void ClusterExtractor::compute_pca_orientation(
+    const PointCloudPtr& cloud,
+    const pcl::PointIndices& cluster,
+    Obstacle& obs)
+{
+  compute_pca_orientation(cloud, cluster, obs, params_);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 规则过滤 (ROBOCON 2027 场景)
 //
 // 过滤条件:
-//   - 任一维度 > max_object_size_ → 围栏/墙面 (过大)
-//   - 高度 > max_object_height_   → 柱子 (过高)
-//   - 点数 < min_object_points_   → 噪点 (过小)
-//   - 底部 z > floating_z_min_    → 悬空物 (底部无支撑)
+//   - 任一维度 > max_object_size   → 围栏/墙面 (过大)
+//   - 高度 > max_object_height     → 柱子 (过高)
+//   - 点数 < min_object_points     → 噪点 (过小)
+//   - 底部 z > floating_z_min      → 悬空物 (底部无支撑)
 //
 // @return true = 应剔除
 // ═══════════════════════════════════════════════════════════════════════════
-bool ClusterExtractor::filter_obstacle(const Obstacle& obs) const
+bool ClusterExtractor::filter_obstacle(const Obstacle& obs, const Params& params)
 {
+  // ⚠️ 本函数是 static 纯函数 ⇒ 拿不到 `this->get_logger()`。用**同名静态 logger**
+  //    （节点名就是 "cluster_extractor"，日志标签不变）。级别是 DEBUG，
+  //    默认控制台级别 INFO ⇒ 平时不打印，单测里也不会刷屏。
+  static const rclcpp::Logger kLogger = rclcpp::get_logger("cluster_extractor");
+
   // 过大物体 (围栏 / 墙面)
-  if (obs.length > max_object_size_ || obs.width > max_object_size_) {
-    RCLCPP_DEBUG(this->get_logger(),
+  if (obs.length > params.max_object_size || obs.width > params.max_object_size) {
+    RCLCPP_DEBUG(kLogger,
       "Filtered LARGE: %.2f x %.2f x %.2f at (%.2f, %.2f)",
       obs.length, obs.width, obs.height, obs.centroid_x, obs.centroid_y);
     return true;
   }
 
   // 过高物体 (柱子)
-  if (obs.height > max_object_height_) {
-    RCLCPP_DEBUG(this->get_logger(),
+  if (obs.height > params.max_object_height) {
+    RCLCPP_DEBUG(kLogger,
       "Filtered TALL: h=%.2f at (%.2f, %.2f)",
       obs.height, obs.centroid_x, obs.centroid_y);
     return true;
   }
 
   // 过小物体 (噪点)
-  if (obs.point_count < min_object_points_) {
+  if (obs.point_count < params.min_object_points) {
     return true;
   }
 
   // 悬空物 (底部无支撑)
-  if (obs.min_z > floating_z_min_) {
-    RCLCPP_DEBUG(this->get_logger(),
+  // ⚠️ `min_z` 的**参考系**由喂进来的点云决定，本函数不做任何变换 ——
+  //    见头文件 `floating_z_min` 那条 ⚠️⚠️（雷达系 vs 场地系，两份实现不一致）。
+  if (obs.min_z > params.floating_z_min) {
+    RCLCPP_DEBUG(kLogger,
       "Filtered FLOATING: z_min=%.2f at (%.2f, %.2f)",
       obs.min_z, obs.centroid_x, obs.centroid_y);
     return true;
@@ -431,27 +495,24 @@ bool ClusterExtractor::filter_obstacle(const Obstacle& obs) const
   return false;
 }
 
+// ── 成员薄包装 ──
+bool ClusterExtractor::filter_obstacle(const Obstacle& obs) const
+{
+  return filter_obstacle(obs, params_);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // 分类猜测
 //
 // 基于包围盒尺寸和 PCA 特征值:
-//   - 三轴 ≈ earth_cube_size_   → EARTH_CUBE   (350mm 立方体)
-//   - 三轴 ≈ sky_cube_size_     → SKY_CUBE     (200mm 立方体)
-//   - 三轴 ≈ enemy_robot_size_  → ENEMY_ROBOT  (700mm 立方体)
-//   - 三轴 ≈ mustika_size_ 且特征值接近 → MUSTIKA (200mm 球体)
+//   - 三轴 ≈ earth_cube_size    → EARTH_CUBE   (350mm 立方体)
+//   - 三轴 ≈ sky_cube_size      → SKY_CUBE     (200mm 立方体)
+//   - 三轴 ≈ enemy_robot_size   → ENEMY_ROBOT  (700mm 立方体)
+//   - 三轴 ≈ mustika_size 且特征值接近 → MUSTIKA (200mm 球体)
 // ═══════════════════════════════════════════════════════════════════════════
-void ClusterExtractor::classify_obstacle(Obstacle& obs)
+void ClusterExtractor::classify_obstacle(Obstacle& obs, const Params& params)
 {
-  const float tol = static_cast<float>(size_tolerance_);
-
-  // 三个维度的平均值和最大偏差
-  const float dims[3] = { obs.length, obs.width, obs.height };
-  const float avg_dim = (dims[0] + dims[1] + dims[2]) / 3.0f;
-  const float max_dev = std::max({
-    std::abs(dims[0] - avg_dim),
-    std::abs(dims[1] - avg_dim),
-    std::abs(dims[2] - avg_dim)
-  });
+  const float tol = static_cast<float>(params.size_tolerance);
 
   auto in_range = [tol](float val, float expected) -> float {
     float diff = std::abs(val - expected);
@@ -459,11 +520,17 @@ void ClusterExtractor::classify_obstacle(Obstacle& obs)
     return 1.0f - (diff / tol);   // [0, 1] 越接近越高的匹配度
   };
 
+  // ⚠️ **分支顺序敏感**：从大到小（敌方 0.70 → 地球 0.35 → 天空/穆斯蒂卡 0.20），
+  //    第一个 `score > 0.5` 的胜出。改顺序会**静默**改变标签。
+  // ⚠️ 2026-09-25 删掉了原地的 `avg_dim` / `max_dev` 两个局部量 ——
+  //    它们算了但**从头到尾没被用过**（死代码），注释却写着"三个维度的平均值和最大偏差"
+  //    暗示它们参与判定。删掉**不改任何输出**。见台账 §八。
+
   // ── 敌方机器人 (700mm 立方体) ──
   {
-    float score = (in_range(obs.length, enemy_robot_size_) +
-                   in_range(obs.width,  enemy_robot_size_) +
-                   in_range(obs.height, enemy_robot_size_)) / 3.0f;
+    float score = (in_range(obs.length, static_cast<float>(params.enemy_robot_size)) +
+                   in_range(obs.width,  static_cast<float>(params.enemy_robot_size)) +
+                   in_range(obs.height, static_cast<float>(params.enemy_robot_size))) / 3.0f;
     if (score > 0.5f) {
       obs.type = ObstacleType::ENEMY_ROBOT;
       obs.confidence = score;
@@ -473,9 +540,9 @@ void ClusterExtractor::classify_obstacle(Obstacle& obs)
 
   // ── 地球方块 (350mm 立方体) ──
   {
-    float score = (in_range(obs.length, earth_cube_size_) +
-                   in_range(obs.width,  earth_cube_size_) +
-                   in_range(obs.height, earth_cube_size_)) / 3.0f;
+    float score = (in_range(obs.length, static_cast<float>(params.earth_cube_size)) +
+                   in_range(obs.width,  static_cast<float>(params.earth_cube_size)) +
+                   in_range(obs.height, static_cast<float>(params.earth_cube_size))) / 3.0f;
     if (score > 0.5f) {
       obs.type = ObstacleType::EARTH_CUBE;
       obs.confidence = score;
@@ -484,29 +551,44 @@ void ClusterExtractor::classify_obstacle(Obstacle& obs)
   }
 
   // ── 天空方块 (200mm 立方体) vs 穆斯蒂卡 (200mm 球体) ──
-  // 两者尺寸相同, 通过 PCA 特征值区分:
-  //   球体: 三特征值接近 (λ1≈λ2≈λ3)
-  //   立方体: 特征值有一定差异
+  // ⚠️ 两者**尺寸同档（都是 200mm 级）** ⇒ 光看尺寸分不开，必须靠 PCA 特征值：
+  //   球体: 三特征值接近 (λ1≈λ2≈λ3) ⇒ 两个比值都≈1
+  //   立方体: 特征值有差异 ⇒ 比值偏离 1
+  //
+  // ⚠️⚠️ **2026-09-25 修**：原实现**只用 `sky_cube_size_` 算 size_score**，
+  //    `mustika_size` 这个键**声明了、读了、日志里打了、还能回设，但任何计算都没碰它**
+  //    ⇒ **改 yaml 里 `mustika_size` 静默不生效**（§零「稳」轴点名的那一类）。
+  //    现在两个尺寸键**各自算自己的匹配度**：`mustika_size` 判"像不像球"，
+  //    `sky_cube_size` 判"像不像立方体"。
+  //    ⚠️ 今天两值都是 0.20 ⇒ 本次改动**数值零变化**（见单测「两者相等时结论不变」那条）。
   {
-    float size_score = (in_range(obs.length, sky_cube_size_) +
-                        in_range(obs.width,  sky_cube_size_) +
-                        in_range(obs.height, sky_cube_size_)) / 3.0f;
+    const float cube_score =
+        (in_range(obs.length, static_cast<float>(params.sky_cube_size)) +
+         in_range(obs.width,  static_cast<float>(params.sky_cube_size)) +
+         in_range(obs.height, static_cast<float>(params.sky_cube_size))) / 3.0f;
 
-    if (size_score > 0.5f) {
-      // 球体判断: 特征值比值都在 [1-tol, 1+tol] 范围内
-      const bool is_spherical =
-        obs.eigen_ratio_1 > 0.0f &&
-        obs.eigen_ratio_2 > 0.0f &&
-        std::abs(obs.eigen_ratio_1 - 1.0f) < sphere_eigen_tol_ &&
-        std::abs(obs.eigen_ratio_2 - 1.0f) < sphere_eigen_tol_;
+    const float ball_score =
+        (in_range(obs.length, static_cast<float>(params.mustika_size)) +
+         in_range(obs.width,  static_cast<float>(params.mustika_size)) +
+         in_range(obs.height, static_cast<float>(params.mustika_size))) / 3.0f;
 
-      if (is_spherical) {
-        obs.type = ObstacleType::MUSTIKA;
-        obs.confidence = size_score * 0.85f;  // 略低于立方体, 因为球体判断更不确定
-      } else {
-        obs.type = ObstacleType::SKY_CUBE;
-        obs.confidence = size_score;
-      }
+    // 球体判断: 特征值比值都在 [1-tol, 1+tol] 范围内
+    // ⚠️ `ratio > 0` 这两条是**防"没算出来"**：`compute_pca_orientation` 在
+    //    n<3 / 分解失败时填的是 1.0（各向同性）而不是 0，所以这里挡的是真正的 0。
+    const bool is_spherical =
+      obs.eigen_ratio_1 > 0.0f &&
+      obs.eigen_ratio_2 > 0.0f &&
+      std::abs(obs.eigen_ratio_1 - 1.0f) < static_cast<float>(params.sphere_eigen_tol) &&
+      std::abs(obs.eigen_ratio_2 - 1.0f) < static_cast<float>(params.sphere_eigen_tol);
+
+    if (is_spherical && ball_score > 0.5f) {
+      obs.type = ObstacleType::MUSTIKA;
+      obs.confidence = ball_score * 0.85f;  // 略低于立方体, 因为球体判断更不确定
+      return;
+    }
+    if (cube_score > 0.5f) {
+      obs.type = ObstacleType::SKY_CUBE;
+      obs.confidence = cube_score;
       return;
     }
   }
@@ -516,19 +598,28 @@ void ClusterExtractor::classify_obstacle(Obstacle& obs)
   obs.confidence = 0.0f;
 }
 
+// ── 成员薄包装 ──
+void ClusterExtractor::classify_obstacle(Obstacle& obs)
+{
+  classify_obstacle(obs, params_);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // 圆柱掩膜
 //
-// 将圆柱中心 (参数配置) 周围 cylinder_mask_radius_ 内的点移除.
+// 将圆柱中心 (参数配置) 周围 `cylinder_mask_radius` 内的点移除.
 // 用于避免圆柱残留点被误聚类为障碍物.
 // ═══════════════════════════════════════════════════════════════════════════
 ClusterExtractor::PointCloudPtr
-ClusterExtractor::mask_cylinders(const PointCloudPtr& cloud)
+ClusterExtractor::mask_cylinders(const PointCloudPtr& cloud, const Params& params)
 {
-  const size_t n_cylinders = cylinder_centers_.size();
+  const size_t n_cylinders = params.cylinder_centers.size();
+  // ⚠️ 没配圆柱 ⇒ **原样返回入参指针**（不是复制一份空壳）：调用方拿到的是同一块内存，
+  //    下游 `extract_clusters` 只读它，安全；但别在这里改成"返回新云"。
   if (n_cylinders == 0) return cloud;
 
-  const float r_sq = static_cast<float>(cylinder_mask_radius_ * cylinder_mask_radius_);
+  const float r_sq = static_cast<float>(
+      params.cylinder_mask_radius * params.cylinder_mask_radius);
 
   auto filtered = std::make_shared<PointCloud>();
   filtered->reserve(cloud->size());
@@ -537,8 +628,10 @@ ClusterExtractor::mask_cylinders(const PointCloudPtr& cloud)
   for (const auto& pt : cloud->points) {
     bool inside = false;
     for (size_t i = 0; i < n_cylinders; ++i) {
-      float dx = pt.x - static_cast<float>(cylinder_centers_[i].first);
-      float dy = pt.y - static_cast<float>(cylinder_centers_[i].second);
+      float dx = pt.x - static_cast<float>(params.cylinder_centers[i].first);
+      float dy = pt.y - static_cast<float>(params.cylinder_centers[i].second);
+      // ⚠️ 只判**水平**距离（不判 z）⇒ 圆柱正上方的点也会被删掉；
+      //    边界是**严格小于** ⇒ 恰好落在半径上的点**保留**。
       if (dx * dx + dy * dy < r_sq) {
         inside = true;
         break;
@@ -552,11 +645,18 @@ ClusterExtractor::mask_cylinders(const PointCloudPtr& cloud)
   }
 
   if (removed > 0) {
-    RCLCPP_DEBUG(this->get_logger(),
+    RCLCPP_DEBUG(rclcpp::get_logger("cluster_extractor"),
       "Cylinder mask removed %zu/%zu points", removed, cloud->size());
   }
 
   return filtered;
+}
+
+// ── 成员薄包装 ──
+ClusterExtractor::PointCloudPtr
+ClusterExtractor::mask_cylinders(const PointCloudPtr& cloud)
+{
+  return mask_cylinders(cloud, params_);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -734,22 +834,22 @@ rcl_interfaces::msg::SetParametersResult ClusterExtractor::on_param_change(
       #define SET_B(n, v)            if (name == n) v = p.as_bool()
       #define ARRAY_CHANGED(n)       if (name == n) cylinder_centers_changed = true
 
-      SET("cluster_tolerance",    cluster_tolerance_);
-      SET_I("min_cluster_size",   min_cluster_size_);
-      SET_I("max_cluster_size",   max_cluster_size_);
-      SET("max_object_size",      max_object_size_);
-      SET("max_object_height",    max_object_height_);
-      SET_I("min_object_points",  min_object_points_);
-      SET("floating_z_min",       floating_z_min_);
-      SET_B("enable_cylinder_mask", enable_cylinder_mask_);
-      SET("cylinder_mask_radius", cylinder_mask_radius_);
-      SET("size_tolerance",       size_tolerance_);
-      SET("earth_cube_size",      earth_cube_size_);
-      SET("sky_cube_size",        sky_cube_size_);
-      SET("enemy_robot_size",     enemy_robot_size_);
-      SET("mustika_size",         mustika_size_);
-      SET("elongation_ratio",     elongation_ratio_);
-      SET("sphere_eigen_tol",     sphere_eigen_tol_);
+      SET("cluster_tolerance",    params_.cluster_tolerance);
+      SET_I("min_cluster_size",   params_.min_cluster_size);
+      SET_I("max_cluster_size",   params_.max_cluster_size);
+      SET("max_object_size",      params_.max_object_size);
+      SET("max_object_height",    params_.max_object_height);
+      SET_I("min_object_points",  params_.min_object_points);
+      SET("floating_z_min",       params_.floating_z_min);
+      SET_B("enable_cylinder_mask", params_.enable_cylinder_mask);
+      SET("cylinder_mask_radius", params_.cylinder_mask_radius);
+      SET("size_tolerance",       params_.size_tolerance);
+      SET("earth_cube_size",      params_.earth_cube_size);
+      SET("sky_cube_size",        params_.sky_cube_size);
+      SET("enemy_robot_size",     params_.enemy_robot_size);
+      SET("mustika_size",         params_.mustika_size);
+      SET("elongation_ratio",     params_.elongation_ratio);
+      SET("sphere_eigen_tol",     params_.sphere_eigen_tol);
 
       ARRAY_CHANGED("cylinder_mask_x");
       ARRAY_CHANGED("cylinder_mask_y");
@@ -772,10 +872,10 @@ rcl_interfaces::msg::SetParametersResult ClusterExtractor::on_param_change(
     this->get_parameter("cylinder_mask_x", cx);
     this->get_parameter("cylinder_mask_y", cy);
     if (cx.size() == cy.size()) {
-      cylinder_centers_.clear();
-      cylinder_centers_.reserve(cx.size());
+      params_.cylinder_centers.clear();
+      params_.cylinder_centers.reserve(cx.size());
       for (size_t i = 0; i < cx.size(); ++i) {
-        cylinder_centers_.emplace_back(cx[i], cy[i]);
+        params_.cylinder_centers.emplace_back(cx[i], cy[i]);
       }
     } else {
       result.successful = false;
@@ -788,10 +888,11 @@ rcl_interfaces::msg::SetParametersResult ClusterExtractor::on_param_change(
       "Params updated | tol=%.3f min=%d max=%d | "
       "filter: size=%.2f h=%.2f pts=%d floating=%.2f | "
       "classify: tol=%.3f earth=%.2f sky=%.2f robot=%.2f mustika=%.2f",
-      cluster_tolerance_, min_cluster_size_, max_cluster_size_,
-      max_object_size_, max_object_height_, min_object_points_, floating_z_min_,
-      size_tolerance_, earth_cube_size_, sky_cube_size_,
-      enemy_robot_size_, mustika_size_);
+      params_.cluster_tolerance, params_.min_cluster_size, params_.max_cluster_size,
+      params_.max_object_size, params_.max_object_height, params_.min_object_points,
+      params_.floating_z_min,
+      params_.size_tolerance, params_.earth_cube_size, params_.sky_cube_size,
+      params_.enemy_robot_size, params_.mustika_size);
   } else {
     RCLCPP_WARN(this->get_logger(), "Param update rejected: %s", result.reason.c_str());
   }

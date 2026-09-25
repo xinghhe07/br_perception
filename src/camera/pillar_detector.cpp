@@ -386,7 +386,8 @@ bool PillarDetector::validate_pillar(
     const cv::Mat& mask,
     const cv::Rect& bbox,
     const std::vector<cv::Point>& contour,
-    PillarImageResult& result)
+    PillarImageResult& result,
+    const PillarParams& params)
 {
   // ── 3a. 包围盒内颜色像素填充率 ──
   cv::Rect valid_bbox = bbox & cv::Rect(0, 0, mask.cols, mask.rows);
@@ -397,24 +398,35 @@ bool PillarDetector::validate_pillar(
   const int fill_px  = cv::countNonZero(mask_roi);
   const float fill_ratio = static_cast<float>(fill_px) / static_cast<float>(total_px);
 
-  if (fill_ratio < min_color_fill_) return false;
+  if (fill_ratio < params.min_color_fill) return false;
 
   // ── 3b. 尺寸合理性 ──
   // 根据真实高度和焦距估算预期的像素高度范围
   // 使用 mustika_pillar (0.5m) 和 core_pillar (0.8m) 的平均
-  const float avg_height_m = (mustika_pillar_height_ + core_pillar_height_) * 0.5f;
+  const float avg_height_m = (params.mustika_pillar_height + params.core_pillar_height) * 0.5f;
   // 距离未知，用柱子像素宽度估算距离
   // distance ≈ (focal * diameter) / pixel_width
-  const float est_distance = (focal_length_px_ * pillar_diameter_)
+  const float est_distance = (params.focal_length_px * params.pillar_diameter)
                              / std::max(static_cast<float>(bbox.width), 1.0f);
-  const float expected_height_px = (focal_length_px_ * avg_height_m) / est_distance;
+  const float expected_height_px = (params.focal_length_px * avg_height_m) / est_distance;
 
   // 允许 ±50% 偏差 (透视和检测误差)
   const float h = static_cast<float>(bbox.height);
-  if (h < expected_height_px * 0.5f || h > expected_height_px * 1.5f) {
-    // 尺寸偏差过大，但仍可能是近距离的大柱子或远距离的小柱子
-    // 不做硬拒绝，降低后续评分
+  // ⚠️⚠️ **2026-09-25 修：原来这里是死代码** —— 上面的 `est_distance` /
+  //    `expected_height_px` 算完之后**什么都不做**，而注释承诺"不做硬拒绝，
+  //    **降低后续评分**" ⇒ 那句承诺**没有任何实现**（"配了不生效"里最难发现的一种）。
+  //    ⇒ 现在把它**接成一个乘子**（不是硬拒 —— 按注释与设计意图）：
+  const float size_ratio = (expected_height_px > 1e-3f) ? (h / expected_height_px) : 1.0f;
+  float size_penalty = 1.0f;   // 1.0 = 完全不罚
+  if (size_ratio < 0.5f) {
+    // 比预期**矮**得多 ⇒ 可能不是柱子（是方块的侧面/噪点）。越矮罚得越多，封底 0.5。
+    size_penalty = std::max(0.5f, 0.5f + size_ratio);
+  } else if (size_ratio > 1.5f) {
+    // 比预期**高**得多 ⇒ 可能是近处大柱子（合理）或误并了两根。同样封底 0.5。
+    size_penalty = std::max(0.5f, 2.5f - size_ratio);
   }
+  // ⚠️ **封底 0.5**：近/远两端都"可能是对的"（注释原话），所以**不给 0 分** ——
+  //    0 分等于硬拒，那与"不做硬拒绝"矛盾。
 
   // ── 3c. 竖直度评分 ──
   cv::RotatedRect rrect = cv::minAreaRect(contour);
@@ -422,8 +434,8 @@ bool PillarDetector::validate_pillar(
   if (angle < -45.0f) angle += 90.0f;
   if (angle < 0.0f)   angle += 90.0f;
   const float deviation = std::abs(angle - 90.0f);
-  // 0° 偏差 = 1.0, max_upright_angle_ 偏差 = 0.0
-  const float upright_score = 1.0f - std::min(deviation / static_cast<float>(max_upright_angle_), 1.0f);
+  // 0° 偏差 = 1.0, params.max_upright_angle 偏差 = 0.0
+  const float upright_score = 1.0f - std::min(deviation / static_cast<float>(params.max_upright_angle), 1.0f);
 
   // ── 3d. 轮廓面积 vs 包围盒面积 ──
   const double contour_area = cv::contourArea(contour);
@@ -436,7 +448,9 @@ bool PillarDetector::validate_pillar(
   const float conf_upright  = upright_score;
   const float conf_solid    = std::min(1.0f, solidity / 0.60f);
 
-  const float confidence = 0.40f * conf_fill + 0.35f * conf_upright + 0.25f * conf_solid;
+  // ⚠️ `size_penalty` 乘在**总分**上（三项权重的比例不变，整体按尺寸合理性打折）
+  const float confidence =
+      size_penalty * (0.40f * conf_fill + 0.35f * conf_upright + 0.25f * conf_solid);
 
   // ── 填充结果 ──
   result.detected     = true;
@@ -452,6 +466,26 @@ bool PillarDetector::validate_pillar(
 
   return true;
 }
+// ── 成员薄包装：行为逐位不变 ──
+bool PillarDetector::validate_pillar(
+    const cv::Mat& bgr, const cv::Mat& mask, const cv::Rect& bbox,
+    const std::vector<cv::Point>& contour, PillarImageResult& result)
+{
+  return validate_pillar(bgr, mask, bbox, contour, result, make_params());
+}
+
+PillarDetector::PillarParams PillarDetector::make_params() const
+{
+  PillarParams p;
+  p.min_color_fill         = min_color_fill_;
+  p.max_upright_angle      = max_upright_angle_;
+  p.pillar_diameter        = pillar_diameter_;
+  p.mustika_pillar_height  = mustika_pillar_height_;
+  p.core_pillar_height     = core_pillar_height_;
+  p.focal_length_px        = focal_length_px_;
+  return p;
+}
+
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 类型判定: 已在 detect() 中由颜色 mask 决定，这里做二次确认

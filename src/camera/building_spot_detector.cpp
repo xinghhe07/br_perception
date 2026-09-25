@@ -502,8 +502,9 @@ bool BuildingSpotDetector::validate_quad(
 // ═══════════════════════════════════════════════════════════════════════════════
 // 内角验证: 四角均应在 90° ± 15° 范围内
 // ═══════════════════════════════════════════════════════════════════════════════
-bool BuildingSpotDetector::validate_angles(
-    const std::vector<cv::Point>& quad, float& angle_score)
+bool BuildingSpotDetector::validate_angles(const std::vector<cv::Point>& quad,
+                                           float& angle_score,
+                                           double min_angle_score)
 {
   float scores[4];
 
@@ -536,14 +537,16 @@ bool BuildingSpotDetector::validate_angles(
   }
 
   angle_score = (scores[0] + scores[1] + scores[2] + scores[3]) * 0.25f;
-  return (angle_score >= min_angle_score_);
+  // ⚠️ 非严格（>=）：评分恰好等于下限 ⇒ 通过
+  return (angle_score >= min_angle_score);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 对边平行度验证
 // ═══════════════════════════════════════════════════════════════════════════════
-bool BuildingSpotDetector::validate_opposite_sides(
-    const std::vector<cv::Point>& quad, float& side_score)
+bool BuildingSpotDetector::validate_opposite_sides(const std::vector<cv::Point>& quad,
+                                                   float& side_score,
+                                                   double min_side_score)
 {
   // 两组对边: (0→1, 2→3) 和 (1→2, 3→0)
   auto edge_vec = [&](int i, int j) -> std::pair<float, float> {
@@ -591,7 +594,20 @@ bool BuildingSpotDetector::validate_opposite_sides(
   const float ratio_score = (ratio_1 + ratio_2) * 0.5f;
 
   side_score = 0.6f * parallel_score + 0.4f * ratio_score;
-  return (side_score >= min_side_score_);
+  return (side_score >= min_side_score);
+}
+
+// ── 成员薄包装：行为逐位不变 ──
+bool BuildingSpotDetector::validate_angles(
+    const std::vector<cv::Point>& quad, float& angle_score)
+{
+  return validate_angles(quad, angle_score, min_angle_score_);
+}
+
+bool BuildingSpotDetector::validate_opposite_sides(
+    const std::vector<cv::Point>& quad, float& side_score)
+{
+  return validate_opposite_sides(quad, side_score, min_side_score_);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

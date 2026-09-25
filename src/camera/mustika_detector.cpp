@@ -373,29 +373,68 @@ MustikaDetector::detect(const cv::Mat& bgr, const std::string& cam_name)
 // ═══════════════════════════════════════════════════════════════════════════════
 // Step 1: 金色区域 mask 生成
 // ═══════════════════════════════════════════════════════════════════════════════
-void MustikaDetector::extract_golden_mask(const cv::Mat& bgr, cv::Mat& mask)
+void MustikaDetector::extract_golden_mask(const cv::Mat& bgr, cv::Mat& mask,
+                                          const MustikaParams& params)
 {
+  // ⚠️ **输入不对就出全零 mask，不抛** —— 上游给空图/灰度图时，
+  //    抛异常会把整条相机链拖垮，而"这一帧没有金色"是完全正常的结果。
+  if (bgr.empty() || bgr.channels() != 3) {
+    mask = cv::Mat::zeros(bgr.empty() ? cv::Size(1, 1) : bgr.size(), CV_8UC1);
+    return;
+  }
+
   // BGR → HSV
   cv::Mat hsv;
   cv::cvtColor(bgr, hsv, cv::COLOR_BGR2HSV);
 
   // ── 对每组金色阈值做 inRange, 并集 ──
+  // ⚠️ **并集**（不是交集）：金色实物是"黄底 + 蓝纹 + 白字"，
+  //    单一阈值区间盖不住受光/背光下的色偏 ⇒ 多组取并。
   mask = cv::Mat::zeros(hsv.size(), CV_8UC1);
 
-  for (const auto& group : golden_groups_) {
+  for (const auto& group : params.golden_groups) {
     cv::Mat group_mask;
     cv::inRange(hsv, group.lower, group.upper, group_mask);
     cv::bitwise_or(mask, group_mask, mask);
   }
 
   // ── 形态学闭运算: 填补球体表面暗斑 ──
-  if (morph_close_iters_ > 0) {
+  if (params.morph_close_iters > 0) {
     cv::Mat kernel = cv::getStructuringElement(
         cv::MORPH_ELLIPSE,
-        cv::Size(morph_close_kernel_, morph_close_kernel_));
+        cv::Size(params.morph_close_kernel, params.morph_close_kernel));
     cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, kernel,
-                     cv::Point(-1, -1), morph_close_iters_);
+                     cv::Point(-1, -1), params.morph_close_iters);
   }
+}
+
+// ── 成员薄包装：行为逐位不变 ──
+void MustikaDetector::extract_golden_mask(const cv::Mat& bgr, cv::Mat& mask)
+{
+  extract_golden_mask(bgr, mask, make_params());
+}
+
+MustikaDetector::MustikaParams MustikaDetector::make_params() const
+{
+  MustikaParams p;
+  p.golden_groups          = golden_groups_;
+  p.morph_close_kernel     = morph_close_kernel_;
+  p.morph_close_iters      = morph_close_iters_;
+  p.hough_dp               = hough_dp_;
+  p.hough_min_dist         = hough_min_dist_;
+  p.hough_param1           = hough_param1_;
+  p.hough_param2           = hough_param2_;
+  p.hough_min_radius       = hough_min_radius_;
+  p.hough_max_radius       = hough_max_radius_;
+  p.min_golden_ratio       = min_golden_ratio_;
+  p.min_circularity        = min_circularity_;
+  p.contour_min_area       = contour_min_area_;
+  p.contour_min_golden_ratio = contour_min_golden_ratio_;
+  p.focal_length_px        = focal_length_px_;
+  p.mustika_real_radius    = mustika_real_radius_;
+  p.min_distance           = min_distance_;
+  p.max_distance           = max_distance_;
+  return p;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -430,11 +469,11 @@ void MustikaDetector::detect_circles_hough(
 // ═══════════════════════════════════════════════════════════════════════════════
 // Step 3: 验证候选圆
 // ═══════════════════════════════════════════════════════════════════════════════
-bool MustikaDetector::validate_circle(
-    const cv::Mat& bgr,
-    const cv::Mat& mask,
-    const cv::Vec3f& circle,
-    MustikaImageResult& result)
+bool MustikaDetector::validate_circle(const cv::Mat& bgr,
+                                            const cv::Mat& mask,
+                                            const cv::Vec3f& circle,
+                                            MustikaImageResult& result,
+                                            const MustikaParams& params)
 {
   const float cx = circle[0];
   const float cy = circle[1];
@@ -443,12 +482,12 @@ bool MustikaDetector::validate_circle(
   // ── 3a. 半径合理性检查 ──
   // 根据真实半径、焦距和距离范围, 估算像素半径有效区间
   const int r_min_by_dist = static_cast<int>(
-      (focal_length_px_ * mustika_real_radius_) / max_distance_);
+      (params.focal_length_px * params.mustika_real_radius) / params.max_distance);
   const int r_max_by_dist = static_cast<int>(
-      (focal_length_px_ * mustika_real_radius_) / min_distance_);
+      (params.focal_length_px * params.mustika_real_radius) / params.min_distance);
 
-  const int eff_min = std::max(hough_min_radius_, r_min_by_dist / 2);
-  const int eff_max = std::min(hough_max_radius_, r_max_by_dist * 2);
+  const int eff_min = std::max(params.hough_min_radius, r_min_by_dist / 2);
+  const int eff_max = std::min(params.hough_max_radius, r_max_by_dist * 2);
 
   if (static_cast<int>(r) < eff_min || static_cast<int>(r) > eff_max) {
     return false;
@@ -479,7 +518,7 @@ bool MustikaDetector::validate_circle(
       ? static_cast<float>(golden_pixels) / static_cast<float>(total_pixels)
       : 0.0f;
 
-  if (golden_ratio < min_golden_ratio_) {
+  if (golden_ratio < params.min_golden_ratio) {
     return false;
   }
 
@@ -492,7 +531,7 @@ bool MustikaDetector::validate_circle(
   float best_circularity = 0.0f;
   for (const auto& cnt : contours) {
     const double area = cv::contourArea(cnt);
-    if (area < contour_min_area_) continue;
+    if (area < params.contour_min_area) continue;
 
     const float circ = compute_circularity(cnt, area);
     if (circ > best_circularity) {
@@ -500,7 +539,7 @@ bool MustikaDetector::validate_circle(
     }
   }
 
-  if (best_circularity < min_circularity_) {
+  if (best_circularity < params.min_circularity) {
     return false;
   }
 
@@ -522,6 +561,14 @@ bool MustikaDetector::validate_circle(
   result.method       = DetectMethod::NONE;  // caller fills
 
   return true;
+}
+
+// ── 成员薄包装：行为逐位不变 ──
+bool MustikaDetector::validate_circle(
+    const cv::Mat& bgr, const cv::Mat& mask,
+    const cv::Vec3f& circle, MustikaImageResult& result)
+{
+  return validate_circle(bgr, mask, circle, result, make_params());
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

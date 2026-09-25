@@ -89,6 +89,33 @@ namespace camera {
 class CameraPerceptionNode : public rclcpp::Node
 {
 public:
+  // ═════════════════════════════════════════════════════════════════════════════
+  // 纯函数：**一个槽的状态判定**（2026-09-25 摘出来，为单测）
+  //
+  // ⚠️ 别小看这几行 —— 它是**整个相机层的健康读数**，而它出过一次错：
+  //    **原判据是 `age > 0`** ⇒ 曝光时刻永远早于组帧时刻 ⇒ `age` 恒为正
+  //    ⇒ `state` **永远到不了 FRESH** ⇒ 那一档等于不存在，
+  //    与 `msg/SlotStatus.msg` 的字段定义和验收判据**直接打架**。
+  //    （见 `doc/待编译验证清单_20260920.md` §I。）
+  // ═════════════════════════════════════════════════════════════════════════════
+  struct SlotVerdict {
+    std::uint8_t state{br_perception::msg::SlotStatus::S_NEVER};
+    /// ⚠️ **NEVER 时本字段无意义**（填 0，见 `msg/SlotStatus.msg`）
+    float stale_sec{0.0f};
+    /// 人看的短说明（`never` / `ok` / `stale`）
+    const char* note{"never"};
+  };
+
+  /// @brief 判一个槽是 NEVER / FRESH / STALE
+  /// @param has_data          这个槽收到过东西没有
+  /// @param age_sec           `组帧时刻 − 该槽最新结果的 header.stamp`（秒）
+  /// @param fresh_tolerance   超过它就算 STALE
+  ///
+  /// ⚠️⚠️ **判据是 `age > tolerance`，不是 `age > 0`**（上面那段历史）。
+  /// ⚠️ **负 `age` 算 FRESH 不算是旧**：那是"**钟不对**"，不是"数据旧" ——
+  ///    该异常由 `stale_sec` 的**负值本身**暴露（**如实报，不钳到 0**）。
+  static SlotVerdict judge_slot(bool has_data, double age_sec, double fresh_tolerance);
+
   explicit CameraPerceptionNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions());
 
   /// @brief 槽位种类（与 msg/SlotStatus.msg 的 `K_*` 常量**逐值一致**）

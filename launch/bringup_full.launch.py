@@ -23,7 +23,7 @@
 
 前置 (必须先 source, 否则找不到驱动与里程计包):
   source /opt/ros/humble/setup.bash
-  source ~/ws_livox/install/setup.bash        # livox_ros_driver2
+  source ~/point_ws/install/setup.bash        # livox_ros_driver2
   source ~/lio_ws/install/setup.bash          # point_lio
   source ~/br_perception/install/setup.bash
 
@@ -137,7 +137,7 @@ def generate_launch_description():
     # ── 1. Livox Mid-360 雷达驱动 (CustomMsg — Point-LIO 的 lidar_type:1 要求) ──
     livox_driver = _include(
         'livox_ros_driver2', 'msg_MID360_launch.py',
-        source_hint='雷达驱动在 ~/ws_livox, 见 ~/livox_lab_up.sh')
+        source_hint='雷达驱动在 ~/point_ws, 见 ~/livox_lab_up.sh')
 
     # ── 2. Point-LIO 里程计节点 (§10.1 / §十.2: 降级为纯里程计, 绝对位姿靠场地先验) ──
     #    复用 lio_ws 的 launch 作为单一事实来源; 此处关掉其自带 rviz
@@ -150,9 +150,18 @@ def generate_launch_description():
         if context.launch_configurations.get('lio', 'true').lower() in ('false', '0', 'no'):
             return []
         return [_include(
-            'point_lio', 'mapping_mid360.launch.py',
+            # ⚠️⚠️ 2026-09-25 修：原写 `mapping_mid360.launch.py` —— **该文件不存在**。
+            #    本机 point_lio 只装了 **`point_lio.launch.py`**（实测
+            #    `~/point_ws/install/point_lio/share/point_lio/launch/` 里就这一个）。
+            #    ⚠️ 这处 bug **`--show-args` 抓不到** —— 它被包在 OpaqueFunction 里、
+            #    推迟到"启动执行期"才解析（本文件上面那段注释正是为此）。
+            #    而 `lio` **默认就是 true** ⇒ **比赛用的这条 launch 一启动就抛
+            #    RuntimeError: 找不到 mapping_mid360.launch.py**。
+            #    两处 launch（lidar_only / pointlio_mapping）是"加载期"就炸，
+            #    这一处是"运行期"才炸 —— 同因不同果，别以为另外两处修了这里就好了。
+            'point_lio', 'point_lio.launch.py',
             launch_arguments={'rviz': 'false'},
-            source_hint='Point-LIO 在 ~/lio_ws (9000_point_lio_ros2_Mid-360)')]
+            source_hint='Point-LIO 在 ~/point_ws/src/point_lio')]
 
     point_lio = OpaqueFunction(function=_point_lio_if_enabled)
 
@@ -266,14 +275,24 @@ def generate_launch_description():
     #     那条链起完**一个发布者都没有** —— 节点恒判"未知"，诊断里写的是
     #     "这一路还没有数据"，**看着像检测器没检到球，实际是相机层压根没起**。
     #
-    #  ⚠️ 只起**得分链上必需的 3 个**：
-    #       image_preprocessor → mustika_detector → camera_perception
+    #  ⚠️ 起**得分链上必需的 4 个**（2026-09-25 起由 3 个加到 4 个）：
+    #       image_preprocessor → mustika_detector / sky_block_detector → camera_perception
     #     · mustika_detector   出 CameraMustika，喂 mustika_pillar_check
+    #     · **sky_block_detector（2026-09-25 加）** 判天空方块**顶面颜色** ——
+    #                          规则 3.5.6/3.5.7 的 40/80 分**只由它决定**，而雷达对颜色
+    #                          无能为力（§3.0.1「判塔顶颜色 = 相机」）。**不挂它的后果**：
+    #                          `/perception/camera/sky_blocks_*` **一个发布者都没有** ⇒
+    #                          `perception_pipeline` 的 `BuildingSpot.top_color` 恒为
+    #                          雷达填的 `UNKNOWN(3)` ⇒ 主控永远判不出塔的归属。
+    #                          ⚠️ 它必须拿到 `field_geometry.yaml`（建筑位坐标），
+    #                          否则投影主路关闭（节点会 WARN 点名，不静默）。
     #     · camera_perception  聚合出 `/perception/camera/frame`，喂 perception_pipeline
     #                          的相机健康判定（不起它，pipeline 里相机一路恒 NEVER）
+    #     ⚠️ 图像源（P2-14）还没接 ⇒ 判色节点**起得来但没数据**，那时它什么都不发是**对的**
+    #        （雷达没报完整塔 ⇒ 不投影）。等相机装上，它的输出正好是"该不该换装位"的证据。
     #     · **不起** pillar_detector / building_spot_detector / camera_depth ——
-    #       它们不在"穆斯蒂卡在柱上"这条得分链上，比赛模式没理由再多占 CPU
-    #       （6 核已分完）。要调它们用 `launch/bringup_debug.launch.py`。
+    #       它们不在得分链上，比赛模式没理由再多占 CPU（6 核已分完）。
+    #       要调它们用 `launch/bringup_debug.launch.py`。
     #
     #  ⚠️ **图像源不在本仓库**：`/camera_wide/image_raw` / `/camera_tele/image_raw`
     #     由工业相机驱动（或 Gazebo）提供。驱动没接上时这 3 个节点**起得来但没数据**
@@ -292,13 +311,19 @@ def generate_launch_description():
     #     ⇒ 不给绝对路径，mustika_detector 会找不到颜色文件而**抛异常**。
     #     （同 `bringup_debug.launch.py` 里那段注释，是同一个坑。）
     color_yaml = os.path.join(pkg_share, 'config', 'color_thresholds.yaml')
+    # ⚠️ 判色节点的**建筑位坐标**（位坐标/平台高/塔高都在它的第 11 节兼容层里）。
+    #    它只喂 `sky_block_detector` —— 与 `lidar_perception_node` 读的是同一组键。
+    field_geometry = os.path.join(pkg_share, 'config', 'field_geometry.yaml')
 
-    # name, plugin, 是否用颜色（三个里只有 mustika_detector 需要）
+    # name, plugin, 是否用颜色（4 个里 mustika_detector / sky_block_detector 需要）
     CAMERA_MIN_SPECS = [
         ('image_preprocessor', 'br_perception::camera::ImagePreprocessor',
          'image_preprocessor', False),
         ('mustika_detector',   'br_perception::camera::MustikaDetector',
          'mustika_detector',   True),
+        # ⚠️ 2026-09-25 加入：那 40/80 分的判据（顶面颜色）在这一路
+        ('sky_block_detector', 'br_perception::camera::SkyBlockDetector',
+         'sky_block_detector', True),
         ('camera_perception',  'br_perception::camera::CameraPerceptionNode',
          'camera_perception_node', False),
     ]
@@ -311,8 +336,11 @@ def generate_launch_description():
             # ⚠️ 参数**顺序有意义，后面的覆盖前面的**（同 bringup_debug 的 make_params）
             ComposableNode(
                 package='br_perception', plugin=plugin, name=name,
-                parameters=[camera_params] + ([{'color_yaml_path': color_yaml}]
-                                              if uses_color else []),
+                parameters=([camera_params]
+                            + ([{'color_yaml_path': color_yaml}] if uses_color else [])
+                            # ⚠️ 只有判色节点要 field_geometry（建筑位坐标）——
+                            #    漏传 ⇒ 三个数组为空 ⇒ 投影主路关闭（会 WARN 点名，不静默）
+                            + ([field_geometry] if name == 'sky_block_detector' else [])),
                 extra_arguments=[{'use_intra_process_comms': True}])
             for name, plugin, _exe, uses_color in CAMERA_MIN_SPECS
         ],

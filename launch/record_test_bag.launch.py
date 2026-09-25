@@ -26,7 +26,7 @@
      只有"想事后对照两次运行的差异"时才需要录，见下。
 
 ═══════════════════════════════════════════════════════════════════════════════
-⚠️ 磁盘（无风扇迷你主机，空间有限）
+⚠️ 磁盘（本机 GMKtec NucBox K6，空间有限）
 ═══════════════════════════════════════════════════════════════════════════════
   两路 1280×720 图像 @30Hz 是很贵的。粗算：一张 720p 原图 ~0.4 MB，
   30Hz × 2 路 ≈ **24 MB/s ≈ 1.4 GB/分钟**（未压缩，rosbag2 默认不压缩）。
@@ -53,7 +53,7 @@
 
 前置:
   source /opt/ros/humble/setup.bash
-  source ~/ws_livox/install/setup.bash
+  source ~/point_ws/install/setup.bash
   source ~/br_perception/install/setup.bash
 
 用法:
@@ -78,10 +78,17 @@ import datetime
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import (DeclareLaunchArgument, ExecuteProcess, LogInfo, Node,
+from launch.actions import (DeclareLaunchArgument, ExecuteProcess, LogInfo,
                             OpaqueFunction)
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
+# ⚠️⚠️ `Node` 只在 `launch_ros.actions` 里 —— **不是** `launch.actions`。
+#    2026-09-25 修：原写成 `from launch.actions import (... Node ...)` ⇒ 本文件
+#    **根本加载不起来**（`ImportError: cannot import name 'Node' from 'launch.actions'`），
+#    症状是 `ros2 launch --show-args` 就报 InvalidLaunchFileError，**不需要真起节点**。
+#    ⚠️ 这个错**编译期抓不到**（launch 是 Python、又不进 colcon test），
+#    只有"真加载一次"才露头 —— 所以每个 launch 都该跑一遍 `--show-args`。
+from launch_ros.actions import Node
 
 
 def generate_launch_description():
@@ -174,7 +181,7 @@ def generate_launch_description():
                '-o', out_dir,
                '-b', str(size_bytes),
                # ⚠️ 不写 `--compression-mode`：默认不压缩，CPU 全留给感知。
-               #    无风扇迷你主机上，边录边压很容易把 CPU 吃满、反过来把要录的帧丢掉。
+               #    本机（GMKtec NucBox K6）上，边录边压很容易把 CPU 吃满、反过来把要录的帧丢掉。
                ] + topics
 
         return [

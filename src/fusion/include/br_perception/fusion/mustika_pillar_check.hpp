@@ -167,19 +167,18 @@ public:
   static constexpr size_t kCamTele = 1;
   static constexpr size_t kCamCount = 2;
 
-private:
   // ═══════════════════════════════════════════════════════════════════════════
-  // 回调
+  // 【纯计算，可单测】标定 / 几何 —— **刻意 public**（见下）
   // ═══════════════════════════════════════════════════════════════════════════
-  void on_camera(uint8_t cam, const br_perception::msg::CameraMustika::SharedPtr msg);
-  void on_lidar(const br_perception::msg::LidarResult::SharedPtr msg);
-
-  /// @brief 主心跳：判定 → 发布状态与诊断
-  void tick();
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // 判定
-  // ═══════════════════════════════════════════════════════════════════════════
+  // ⚠️ 提到 public **不是**为了给外部调用，是为了**测试能调**（`test_mustika_pillar_check`
+  //    只测这两个，不起 ROS 节点、不用 TF）。它们是判定的核心几何，而
+  //    「距离公式错」与「反投影约定错」正是两类最贵的错：前者会让人反复去标外参，
+  //    后者**整体差 90° 且不报错**。
+  //    同款处理：`SkyBlockDetector::judge_top_color` / `project_with_transform`、
+  //    `PerceptionPipeline::choose_sky_color` —— 全是 static 纯函数 + public。
+  // ⚠️ 2026-09-25：首次真编到 `test_mustika_pillar_check` 时这两个还留在 `private`
+  //    ⇒ 测试侧**直接编译不过**（`is private within this context`）。
+  //    "纯函数摘出来了、却够不着"与"文件写完没接进构建"是同一类断链。
 
   /// @brief 用**已知球径**从像素半径反推距离：`d = f · D / (2r)`
   /// @return 距离 [m]；`r <= 0` 或焦距非法 → `std::nullopt`
@@ -193,6 +192,22 @@ private:
   ///    是光学系而这里按机身系算，结果会整体错 90° 且**不报错** —— 标定时盯残差。
   static void back_project(double u, double v, double depth, double fx, double fy,
                            double cx, double cy, double* xyz);
+
+private:
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 回调
+  // ═══════════════════════════════════════════════════════════════════════════
+  void on_camera(uint8_t cam, const br_perception::msg::CameraMustika::SharedPtr msg);
+  void on_lidar(const br_perception::msg::LidarResult::SharedPtr msg);
+
+  /// @brief 主心跳：判定 → 发布状态与诊断
+  void tick();
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 判定
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ⚠️ 两个纯几何函数（`range_from_pixel_radius` / `back_project`）在**类顶的
+  //    public 段**里 —— 为了测试够得着，理由写在那里。
 
   /// @brief 一路相机的判定结果（诊断要用，所以把中间量都留着）
   struct CameraVerdict {

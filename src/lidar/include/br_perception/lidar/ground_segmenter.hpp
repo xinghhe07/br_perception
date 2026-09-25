@@ -37,6 +37,25 @@ namespace lidar {
 class GroundSegmenter : public rclcpp::Node
 {
 public:
+
+  // ══════════════════════════════════════════════════════════════════════
+  // 纯函数 —— **static + public**，可被 `test/test_ground_segmenter.cpp` 直接调
+  // （仓库既有模式：`ClusterExtractor::filter_obstacle`、`SkyBlockDetector::judge_top_color`）
+  // ══════════════════════════════════════════════════════════════════════
+
+  /// @brief 平面法向量是不是"**像地面**"（与 Z 轴的夹角小于阈值）
+  /// @param coeff            PCL 平面系数 `ax+by+cz+d=0`（**不要求已归一化**）
+  /// @param angle_threshold  允许的最大夹角（**弧度**）
+  ///
+  /// ⚠️ **取 `|c|` 再算夹角** ⇒ 法向量朝向不影响结论（`(0,0,1)` 与 `(0,0,-1)` 同判）。
+  ///    RANSAC 给的系数**朝向是任意的**，不取绝对值的话**一半的地面会被否掉**。
+  /// ⚠️ 零法向量（`norm < 1e-9`）⇒ **返回 false（不是 NaN）**。
+  ///    ⚠️ 不防的话 `acos(0/0)` = NaN，而 `NaN < threshold` **恒为 false** ——
+  ///    侥幸结果一样，但**上游一旦把 NaN 传出去就是灾难**（它污染一切比较）。
+  /// ⚠️ 边界是**严格 `<`**：夹角恰好等于阈值 ⇒ **不算地面**。
+  [[nodiscard]] static bool validate_plane_normal(const pcl::ModelCoefficients& coeff,
+                                                  double angle_threshold);
+
   using PointCloud    = pcl::PointCloud<pcl::PointXYZ>;
   using PointCloudPtr = PointCloud::Ptr;
 
@@ -53,6 +72,7 @@ private:
                         pcl::ModelCoefficients& coeff,
                         pcl::PointIndices& inliers);
 
+  /// 成员薄包装：把 `normal_angle_threshold_` 传进去（节点行为逐位不变）
   bool validate_plane_normal(const pcl::ModelCoefficients& coeff) const;
 
   pcl::PointIndices refine_inliers_adaptive(const PointCloudPtr& cloud,

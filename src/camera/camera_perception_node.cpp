@@ -61,6 +61,36 @@ const char* CameraPerceptionNode::slot_name(size_t slot)
 // ═══════════════════════════════════════════════════════════════════════════════
 // 构造
 // ═══════════════════════════════════════════════════════════════════════════════
+CameraPerceptionNode::SlotVerdict CameraPerceptionNode::judge_slot(
+    bool has_data, double age_sec, double fresh_tolerance)
+{
+  SlotVerdict v;
+  if (!has_data) {
+    // ⚠️ NEVER 与 STALE 是**两回事**（见 msg/SlotStatus.msg）：
+    //    NEVER 多半是"话题名对不上 / 发布端没起 / 这路相机压根没装"，
+    //    STALE 是"跑过，但慢了"。现场排查方向完全不同。
+    v.state = br_perception::msg::SlotStatus::S_NEVER;
+    v.stale_sec = 0.0f;
+    v.note = "never";
+    return v;
+  }
+
+  // ⚠️ **如实报负值，不钳到 0** —— "时间是负的"本身就是要暴露的异常
+  v.stale_sec = static_cast<float>(age_sec);
+
+  // ⚠️⚠️ **判据是 `age > tolerance`，不是 `age > 0`**：
+  //    曝光时刻**永远早于**组帧时刻 ⇒ `age` 恒为正 ⇒ 拿 `age > 0` 当判据会让
+  //    `state` **永远到不了 FRESH**，那一档等于不存在。
+  // ⚠️ **负 age（时间戳在未来）算 FRESH**：那是"**钟不对**"，不是"数据旧"，
+  //    该异常由 `stale_sec` 的负值本身暴露。
+  // ⚠️ 边界**非严格**：恰好等于容差算 FRESH。
+  const bool stale = age_sec > fresh_tolerance;
+  v.state = stale ? br_perception::msg::SlotStatus::S_STALE
+                  : br_perception::msg::SlotStatus::S_FRESH;
+  v.note = stale ? "stale" : "ok";
+  return v;
+}
+
 CameraPerceptionNode::CameraPerceptionNode(const rclcpp::NodeOptions& options)
   : Node("camera_perception", options)
 {
@@ -359,10 +389,13 @@ void CameraPerceptionNode::frame_tick()
     st.kind      = static_cast<uint8_t>(i / kCamCount);
     st.camera_id = static_cast<uint8_t>(i % kCamCount);
 
+    // ⚠️ 判定逻辑在 `judge_slot()`（static 纯函数，可被单测直接喂）——
+    //    这里只做搬运，**不再内联一份判据**（判据只实现一次，那是防漂移的唯一办法）。
     if (!snap[i].has_data) {
-      st.state = br_perception::msg::SlotStatus::S_NEVER;
-      st.stale_sec = 0.0f;   // ⚠️ NEVER 时本字段无意义（见 msg/SlotStatus.msg）
-      st.note = "no data yet";
+      const auto v = judge_slot(false, 0.0, fresh_tolerance_sec_);
+      st.state = v.state;
+      st.stale_sec = v.stale_sec;   // ⚠️ NEVER 时本字段无意义（见 msg/SlotStatus.msg）
+      st.note = v.note;
       continue;
     }
 
@@ -380,12 +413,12 @@ void CameraPerceptionNode::frame_tick()
     //   那样的槽永远报 STALE，FRESH 这一档等于不存在。
     //   ⚠️ 负值（时间戳在未来）算 FRESH 不算是旧：它是"钟不对"，不是"数据旧"，
     //      该异常由下面的全局告警 + stale_sec 的负值本身暴露。
-    const bool stale = age > fresh_tolerance_sec_;
-    st.state = stale ? br_perception::msg::SlotStatus::S_STALE
-                     : br_perception::msg::SlotStatus::S_FRESH;
-    st.note = stale ? "stale" : "ok";
+    const auto v = judge_slot(true, age, fresh_tolerance_sec_);
+    st.state = v.state;
+    st.stale_sec = v.stale_sec;   // ⚠️ 如实报（可能是负的，不钳 0）
+    st.note = v.note;
     ++populated;
-    if (stale) ++stale_cnt;
+    if (v.state == br_perception::msg::SlotStatus::S_STALE) ++stale_cnt;
   }
 
   // ── 深度 ──

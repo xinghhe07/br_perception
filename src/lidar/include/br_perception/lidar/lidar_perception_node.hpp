@@ -7,6 +7,12 @@
 #include <std_msgs/msg/float32_multi_array.hpp>
 #include <std_msgs/msg/color_rgba.hpp>
 
+// ⚠️ **只读 TF**：把输入点云从雷达系搬到场地系（见下面「坐标系纪律」那段）。
+//    ⚠️ 不 include/链接 `coordinate_transformer.hpp` —— 那会让雷达层反向依赖融合层。
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
+#include <geometry_msgs/msg/transform_stamped.hpp>
+
 // ── 对外数据接口 (设计文档 §5.1) ──
 // ⚠️ 2026-09-22 接上: `LidarResult.msg` 建于 2026-09-18, 但**一直没有被任何代码引用** ——
 //    本节点当时发的仍是 `diagnostic_msgs/DiagnosticArray`（"给人看的", 见该 msg 头注释）。
@@ -41,6 +47,14 @@ enum class BuildingSpotStatus : uint8_t {
   ONE_EARTH      = 1,
   TWO_EARTH      = 2,
   COMPLETE_TOWER = 3,
+  /// ⚠️⚠️ **没量成**（2026-09-24 新增，与组件那份 `building_spot_analyzer.hpp` 同一口径）——
+  /// TF 不可用 / 定不到位 ⇒ 这一位**无从判断**。
+  ///
+  /// ⚠️ **别用 `EMPTY` 冒充它**：主控会把"我没量到"读成"这个位是空的"，
+  ///    于是**塔明明建着、它以为没建**。两者动作完全不同。
+  /// ⚠️ 这份与组件那份是**同一段代码的两个拷贝**（台账 §六 记为技术债）——
+  ///    **改一处必须改两处**，否则跑单体时又变回去。
+  UNKNOWN        = 4,
 };
 
 struct BuildingSpot {
@@ -199,7 +213,18 @@ private:
   // 管线阶段 (每个返回结果 + 耗时)
   // ═══════════════════════════════════════════════════════════════════════
 
+  /// [0] **把输入点云搬到场地系**（2026-09-24 新增，见下面「坐标系纪律」那段）
+  ///
+  /// @param in   输入点云（系由 `hdr.frame_id` 声明）
+  /// @param hdr  该帧的 header（⚠️ **时间戳用它的**，TF 要查那一时刻的变换）
+  /// @param out  变换结果；已在场系或 `world_frame` 为空时**原样返回 `in`**（不拷贝）
+  /// @return false = **变换不成**（TF 不可用 / frame_id 为空）
+  ///         ⇒ 调用方**必须报 UNKNOWN，不许当成"空位"**
+  bool cloud_to_world(const PointCloudPtr& in, const std_msgs::msg::Header& hdr,
+                      PointCloudPtr& out);
+
   /// [1] 预处理: 降采样 → 离群点 → ROI裁剪 → 自过滤
+  /// ⚠️ **要求入参已在场地系**（ROI 的 z 上下限是绝对高度，见「坐标系纪律」）
   /// @return {过滤后点云, 耗时_ms}
   std::pair<PointCloudPtr, double> preprocess_stage(const PointCloudPtr& input);
 
@@ -279,19 +304,46 @@ private:
   // ═══════════════════════════════════════════════════════════════════════
   // 发布
   // ═══════════════════════════════════════════════════════════════════════
-  void publish_intermediate(const PointCloudPtr& filtered,
-                            const GroundResult& gr,
-                            const std::vector<CylinderDetection>& cylinders,
-                            const std::vector<Obstacle>& obstacles,
-                            const std::vector<BuildingSpot>& spots,
-                            const std_msgs::msg::Header& header);
+  /// @brief **中间结果 —— 拆成两半，因为它们的"该不该发"由两件不同的事决定**
+  ///
+  /// ⚠️⚠️ 2026-09-24 拆的，理由是一张错表咬过一次：
+  ///    · **数据接口**（有代码订阅者）⇒ 挂 `publish_intermediate_topics_`
+  ///      `filtered`（1 个订阅者：`ground_segmenter`）、
+  ///      `non_ground`（**3 个**：`building_spot_analyzer` / `cluster_extractor` /
+  ///       `cylinder_detector`）—— 它们是**容器化拓扑里组件的输入**。
+  ///      ⚠️ 把它们关掉 = **组件那条链饿死**（症状与"代码坏了"一样）。
+  ///    · **纯可视化**（**零**订阅者，`python3 scripts/check_topic_consumers.py` 可复核）
+  ///      ⇒ 挂 `debug_enabled_`：ground / l0..l2_surface / ground_plane /
+  ///      pillars / obstacles / building_spots —— 给 RViz 看的。
+  ///    ⇒ 比赛模式（`debug_enabled_ = false`）下只剩 **2 次**整份点云拷贝，
+  ///      而不是原来那 6 次 —— 组件照样喂饱，CPU 也省下来。
+  ///   ⚠️ 复核命令写在上面了：**下次再挂开关之前先跑它**（台账 §八 的纪律）。
+  void publish_intermediate_data(const PointCloudPtr& filtered,
+                                 const GroundResult& gr,
+                                 const std_msgs::msg::Header& header);
+
+  void publish_intermediate_viz(const GroundResult& gr,
+                                const std::vector<CylinderDetection>& cylinders,
+                                const std::vector<Obstacle>& obstacles,
+                                const std::vector<BuildingSpot>& spots,
+                                const std_msgs::msg::Header& header);
 
   /// @brief 发布对外数据接口 `LidarResult`（话题 `/perception/lidar/result`）
   /// @param result   本帧感知结果
-  /// @param frame_id **原样继承输入点云**的坐标系名 —— 本节点不做任何坐标变换，
-  ///                 **不要在这里写死 "world"**（那是融合层的产出，见实现注释）
+  /// @param frame_id **`result` 里那些坐标真正所在的系**。
+  ///                 ⚠️ 2026-09-24 起是**场地系**（`world_frame_`）—— 本节点现在真的
+  ///                 把点云换到那个系里算了，所以这里写的必须是它，不是输入点云的系。
+  ///                 ⚠️ 老注释说"不要写死 world（那是融合层的产出）"—— 那句话的**前提
+  ///                 （本节点不做变换、输出系 = 输入系）已经不成立了**，别再照它办。
   void publish_unified_result(const LidarPerceptionResult& result,
                               const std::string& frame_id);
+
+  /// @brief 一帧**全报 UNKNOWN** —— 换不到场地系时的唯一诚实做法
+  ///
+  /// ⚠️⚠️ **不许回落成"空位"**：拿不到坐标时若报 `EMPTY`，主控会把"**我没量到**"
+  ///    读成"**这个位是空的**" —— 塔明明建着，它以为没建（两件事的动作完全不同）。
+  ///    ⚠️ 也**不许干脆不发**：主控分不清"没有塔"和"感知挂了"。
+  void publish_all_unknown(const std_msgs::msg::Header& header, const char* reason);
 
   void publish_debug_cloud(const PointCloudPtr& ground,
                            const PointCloudPtr& non_ground,
@@ -307,6 +359,43 @@ private:
   // 话题
   // ═══════════════════════════════════════════════════════════════════════
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_raw_;
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ⚠️⚠️ 坐标系纪律（2026-09-24 立）—— **本模块最毒的一个坑，且一直没被发现**
+  //
+  //   本节点的**每一个常量都是在场地系里量的**：
+  //     · `l0/l1/l2_height` = 0.0 / 0.6 / 0.9  —— 平台面的**绝对**高度
+  //       （`ground_segmenter.cpp:327` 就是 `|pt.z − l1_height_| < tol` 的绝对比较）
+  //     · `roi_min_z/-0.5_roi_max_z/2.0`      —— 地面以下到 2m 的**绝对**高度
+  //     · `building_spot_x/y/z`               —— `field_geometry.yaml` 的场地常量
+  //   而输入点云是**雷达系**（`livox_frame`，随车走）——
+  //   `livox_custom_to_pcl2` 桥接发出来时写死的就是它。
+  //
+  //   ⇒ 不换系就三个后果，**一个都不会报错**：
+  //     ① 地面分层全空: 雷达离地 ~0.24m ⇒ `pt.z − 0.0` 恒 ≈ −0.24，L0/L1/L2 **一个都匹配不上**
+  //     ② 建筑位 CropBox 裁到空气: 场地常量 (2.80, 2.80) 被当成"车前方 2.8m" ⇒ 裁不到点 ⇒ EMPTY
+  //     ③ 所有对外坐标都**不在 `header.frame_id` 声明的那个系里**（第一宗旨「准」那条的原话）
+  //
+  //   ⚠️ 它在"车停在原点、朝向一致"时**完全看不出来**（两个系恰好重合）——
+  //      这正是台架联调时它一直没露头的原因。**必须动着测。**
+  //
+  //   ⇒ 纪律: **点云进回调第一件事就是搬到场地系**，之后全流程只认场地系常量。
+  //   ⇒ 定位不到时**报 UNKNOWN，不许回落成 EMPTY**（`BuildingSpotStatus::UNKNOWN`）。
+  // ═══════════════════════════════════════════════════════════════════════════
+  /// @brief 场地系名字（`building_spot_*` 与各高度常量所在的那个系）
+  ///        ⚠️ 融合层的 `CoordinateTransformer` 广播的就是这个名字（`fusion_params.yaml`）
+  std::string world_frame_{"world"};
+
+  /// @brief TF 查询超时 [s] —— ⚠️ **别用 tf2 的默认值 0**（同 `mustika_pillar_check` 的教训）：
+  ///        点云时间戳由雷达打、TF 由里程计/融合层打，两边跨进程；给 0 时缓冲区
+  ///        还没包住该时刻就直接抛，症状会写成"取不到建筑位"。
+  double tf_timeout_sec_{0.05};
+
+  /// @brief 只读 TF（⚠️ **不链接 `fusion::CoordinateTransformer`** —— 那会让雷达层
+  ///        反向依赖融合层；TF 是基础设施，直接用 `tf2_ros`。本节点**只读不广播**，
+  ///        多一个广播者就会撞 `TF_REPEATED_DATA`。）
+  std::unique_ptr<tf2_ros::Buffer>            tf_buffer_;
+  std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
 
   // 中间结果发布
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_filtered_;
@@ -432,6 +521,16 @@ private:
   // ═══════════════════════════════════════════════════════════════════════
   // 参数 — 调试 & 看门狗
   // ═══════════════════════════════════════════════════════════════════════
+  /// @brief **数据接口**话题发不发 —— 只指 `filtered` 与 `non_ground` 两条
+  ///        （它们的订阅者见 `publish_intermediate_data` 的注释）。
+  ///
+  /// ⚠️ 默认 **true** —— 它们**不是"给人看的装饰"**，而是**容器化拓扑里组件的输入**：
+  ///    关掉 = 3 个组件没有输入 ⇒ **整条容器化链饿死**（症状与"代码坏了"一样）。
+  /// ⚠️ 与 `debug_enabled_` **不是一回事**：那个管"给人看的东西"（8 条零订阅者的话题
+  ///    + `debug_cloud`）。**混用早晚咬一次** —— 2026-09-23 就咬了（台账 §八）。
+  /// ⇒ 只在确认"**单体独占、组件不在场**"时才置 false（省下 2 次整份点云拷贝）。
+  bool   publish_intermediate_topics_{true};
+
   bool   debug_enabled_{false};
   double watchdog_timeout_{1.0};     // 雷达超时阈值 (秒)
   int    max_skip_frames_{3};        // 连续跳过帧数上限

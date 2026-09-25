@@ -216,17 +216,35 @@ bool GroundSegmenter::fit_ground_plane(const PointCloudPtr& cloud,
 // ═══════════════════════════════════════════════════════════════════════════
 // 法向量验证
 // ═══════════════════════════════════════════════════════════════════════════
-bool GroundSegmenter::validate_plane_normal(const pcl::ModelCoefficients& coeff) const
+bool GroundSegmenter::validate_plane_normal(const pcl::ModelCoefficients& coeff,
+                                            double angle_threshold)
 {
-  const double norm = std::sqrt(coeff.values[0] * coeff.values[0] +
-                                coeff.values[1] * coeff.values[1] +
-                                coeff.values[2] * coeff.values[2]);
+  // ⚠️ `coeff.values` 的**长度不保证是 4**（PCL 的 `ModelCoefficients` 是个裸 `vector<float>`）
+  //    ⇒ 不检查就索引是**越界读**。正常 RANSAC 会给 4 个，但这是公开函数，要自己兜住。
+  if (coeff.values.size() < 4) return false;
+
+  const double a = coeff.values[0];
+  const double b = coeff.values[1];
+  const double c = coeff.values[2];
+  const double norm = std::sqrt(a * a + b * b + c * c);
+  // ⚠️ 零法向量 ⇒ **直接 false**（不是让它去算 acos(0/0)=NaN）。
+  //    侥幸的是 `NaN < threshold` 恒为 false、结果一样 ——
+  //    但**一旦 NaN 从这里流出去就会污染上游的一切比较**。
   if (norm < 1e-9) return false;
 
   // 与 Z 轴 [0,0,1] 的夹角
-  const double cos_angle = std::abs(coeff.values[2]) / norm;
+  // ⚠️ **取 `|c|`**：RANSAC 给的系数朝向是任意的，不取绝对值的话**一半的地面会被否掉**。
+  const double cos_angle = std::abs(c) / norm;
+  // ⚠️ `std::clamp` 防浮点越界（`|c|/norm` 差一点点超过 1 会让 `acos` 出 NaN）
   const double angle = std::acos(std::clamp(cos_angle, -1.0, 1.0));
-  return angle < normal_angle_threshold_;
+  // ⚠️ **严格 `<`**：恰好等于阈值不算地面
+  return angle < angle_threshold;
+}
+
+// ── 成员薄包装：行为逐位不变 ──
+bool GroundSegmenter::validate_plane_normal(const pcl::ModelCoefficients& coeff) const
+{
+  return validate_plane_normal(coeff, normal_angle_threshold_);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
