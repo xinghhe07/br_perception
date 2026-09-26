@@ -250,32 +250,44 @@ def gen_field():
     s.cyl('core_pillar', cp['position'][0], cp['position'][1], L2H, L2H + cp['height'],
           cp['radius'], col('central_pillar_brown'))
 
-    # ── 天空方块 12 块 (200mm, 落在地面) ──
-    # ── 天空方块: 每块 200³, **红蓝各半** ──
-    #   ✅ 2026-09-17 用户确认 "每块是红蓝各半"; 规则书 sky_block 条目原文也是
-    #      "colored red on one side and blue on the other" → 一块 = 两个半块
-    #   位置与分色方向均取自官方总装配 (见 config 注释)
-    #   positions 第三个数 = code: 1.0=沿y分 红南 / 2.0=沿y分 红北 /
-    #                              3.0=沿x分 红西 / 4.0=沿x分 红东
+    # ── 天空方块 12 块 (200×200×200, 落在地面) ──
+    # ⚠️⚠️ 2026-09-24 **裁定: 顶面是纯色**（"每块红蓝各半"是**误读**）—— 依据见
+    #   `config/field_geometry.yaml` 的 sky_block_initial 与台账 §八:
+    #     ① 官方原文 "colored red on one side and blue on the other" = **相对的两面**
+    #        一红一蓝, 不是"每一面各半";
+    #     ② 规则 3.5.6 "scored based on the color of their **top surface**" +
+    #        3.5.8 "flip … to ensure their **color faces upward**" ——
+    #        这套判据**只有在"顶面纯色、翻转即换色"时才可执行**;
+    #        若顶面恒半红半蓝, 裁判自己都判不出分, 规则不可能这样写;
+    #     ③ 官方总装配的"每块 = 整块 + 半块"是**沿竖直方向**拼的两个半高件
+    #        （所以才有"红蓝各半"这种说法），**不是把顶面切成两半**。
+    #   ⇒ 块建成**上下两半**: 下半蓝、上半红 ⇒
+    #        正放: 顶面**纯红**      倒放(翻转 180°): 顶面**纯蓝**
+    #
+    #   ⚠️ `positions` 第三个数 code（红南/红北/红西/红东）现在读作**该块在棋盘里的
+    #     朝向**（与 4.1.4 的镜像对称一致），**不是单块顶面的分区方向**:
+    #      它**不影响顶面判色**（块绕竖轴旋转是不变的量），所以本生成器**不再按它切面**。
+    #      数据**保留**（那是官方总装配的实测方向），但不再当"分色方向"用。
+    #
+    #   ⚠️ **待确认（FAQ）**: 规则书 Figure 4 里各格**朝上的颜色**（红/蓝交错图案）
+    #      本仓库**没有可解析依据** ⇒ 现在 12 块**全部红上**。若 Figure 4 确为红蓝交错,
+    #      要改成"其中若干块倒放"（蓝上红下）——**那件事的数据来源待组织方确认**。
+    #
+    #   ⚠️⚠️ 给判色链的话: 仿真里若跑出 `RATIO_AMBIGUOUS`（红蓝各半）⇒ **是模型错了,
+    #      不是规则模糊** —— **不许据此去放宽 `decisive_ratio`**（那会把判错的代价
+    #      从"判不出"变成"判反", 而判反 = 把塔的归属送给对手）。
     step = sb['grid_step']
     pos = sb['positions']
     hblock = 0.20
     for i in range(0, len(pos), 3):
-        x, y, code = pos[i], pos[i + 1], pos[i + 2]
+        x, y, _code = pos[i], pos[i + 1], pos[i + 2]
         x0, x1 = x - step / 2, x + step / 2
         y0, y1 = y - step / 2, y + step / 2
-        if code == 1.0:            # 沿 y 分, 红南
-            red, blue = (x0, y0, x1, y), (x0, y, x1, y1)
-        elif code == 2.0:          # 沿 y 分, 红北
-            red, blue = (x0, y, x1, y1), (x0, y0, x1, y)
-        elif code == 3.0:          # 沿 x 分, 红西
-            red, blue = (x0, y0, x, y1), (x, y0, x1, y1)
-        else:                      # 4.0 沿 x 分, 红东
-            red, blue = (x, y0, x1, y1), (x0, y0, x, y1)
-        s.box('sky_%02d_0' % (i // 3), red[0], red[1], red[2], red[3],
-              0, hblock, col('sky_block_red_face'))
-        s.box('sky_%02d_1' % (i // 3), blue[0], blue[1], blue[2], blue[3],
-              0, hblock, col('sky_block_blue_face'))
+        # 两个半高件（竖直拼）—— 名字直说哪半在上、是什么色，改错了一眼能看出来
+        s.box('sky_%02d_bottom_blue' % (i // 3), x0, y0, x1, y1,
+              0, hblock / 2, col('sky_block_blue_face'))
+        s.box('sky_%02d_top_red' % (i // 3), x0, y0, x1, y1,
+              hblock / 2, hblock, col('sky_block_red_face'))
 
     # ── 场地外圈围栏 (20mm × 50mm) —— 立在 11×11 净区**外面** ──
     s.box('fence_s', -fw, -fw, 11 + fw, 0.0, 0, fh, col('game_field_boundary'))
@@ -304,7 +316,11 @@ def gen_field():
 
     xa, xb = 5.5 - cw / 2, 5.5 + cw / 2
     # 地面段要减掉: L1 台体 (埋掉看不见) + 两处共享区 (天空棋盘 / 圣所, 官方本来就没墙)
-    gcut = [(l1y0, l1y1)] + [tuple(b) for b in cd.get('ground_breaks_y', [])]
+    # ⚠️ `ground_breaks_y` 是**拍平**的 `[y0,y1, y0,y1, ...]`（2026-09-25 改，
+    #    原为嵌套数组 `[[..],[..]]` —— 那会让 bringup_debug.launch.py 整份起不来，
+    #    理由见 config/field_geometry.yaml 该键上方的 ⚠️⚠️）。这里两两配对还原成区间。
+    _gby = cd.get('ground_breaks_y', [])
+    gcut = [(l1y0, l1y1)] + list(zip(_gby[0::2], _gby[1::2]))
     for k, (p0, p1) in enumerate(
             minus_span(cd['ground_y_range'][0], cd['ground_y_range'][1], gcut)):
         s.box('divider_g_%d' % k, xa, p0, xb, p1, 0.0, chh, col('center_divider_fence'))

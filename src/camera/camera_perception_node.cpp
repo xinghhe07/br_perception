@@ -360,6 +360,8 @@ void CameraPerceptionNode::frame_tick()
   frame->frame_age_sec = any
     ? static_cast<float>((now_ros - newest_stamp).seconds())
     : 0.0f;
+  // 留一份给诊断（同源同值）—— 见头文件里这个成员的注释
+  last_frame_age_sec_ = static_cast<double>(frame->frame_age_sec);
 
   // ── 填充三个检测数组（下标 = camera_id，各定长 2）──
   // ⚠️ 消息里声明的是 `CameraMustika[2]`（**定长**），生成的 C++ 类型是
@@ -533,6 +535,49 @@ void CameraPerceptionNode::publish_diagnostics()
   }
 
   arr.status.push_back(st);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ⚠️ 端到端**年龄**（2026-09-26 加）—— **与雷达那路同口径、同键名**。
+  //
+  //   为什么要单开一条、而不是让人去 `CameraFrame.frame_age_sec` 里看：
+  //   对"三路总延迟 < 50ms"对账时，雷达在**诊断**里、相机在**数据消息**里 ——
+  //   要开两种工具才能并排看。这里补一份同名的，`ros2 topic echo` 一次就能对。
+  //
+  //   ⚠️⚠️ **键名必须与 `lidar_perception_node` 的 `end_to_end_latency`
+  //      逐字一致**（`age_newest_ms` / `period_ms`）—— 名字不一致的"对齐"
+  //      本身就在制造歧义。
+  //
+  //   ⚠️ **相机没有"最旧/最新"之分**：整帧在同一瞬间曝光，所以只报一个 age。
+  //      雷达那边一帧横跨 100ms，必须报两个 —— **这个差别是本质的，别去"统一"它**。
+  //
+  //   ⚠️ 阈值 56/80 与 `config/perception_params.yaml` 的
+  //      `latency_warn_ms` / `latency_error_ms` 同源（那正是 §15.3 给视觉的 46+10/…）。
+  // ═══════════════════════════════════════════════════════════════════════════
+  diagnostic_msgs::msg::DiagnosticStatus lx;
+  lx.name = "end_to_end_latency";
+  lx.hardware_id = "camera_layer";
+
+  const double age_ms = last_frame_age_sec_ * 1000.0;
+  if (age_ms < 56.0) {
+    lx.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
+    lx.message = "Latency OK";
+  } else if (age_ms < 80.0) {
+    lx.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+    lx.message = "Latency over warn (56ms)";
+  } else {
+    lx.level = diagnostic_msgs::msg::DiagnosticStatus::ERROR;
+    lx.message = "Latency over error (80ms)";
+  }
+  lx.values.push_back(kv("age_newest_ms", std::to_string(age_ms)));
+  // ⚠️ `last_populated_ == 0` 时 `frame_age_sec` 是 0（没有数据 ⇒ 无从谈年龄），
+  //    会被读成"延迟极好" —— **恰好把"一路都没数据"这个要暴露的情况盖住**。
+  //    所以照 `camera_perception` 那条的做法，把槽计数一并放进 values；
+  //    真正判"有没有数据"看上面那条 `camera_perception` 的 `populated_slots`。
+  lx.values.push_back(kv("populated_slots",
+                         std::to_string(last_populated_) + "/" + std::to_string(kSlotCount)));
+
+  arr.status.push_back(lx);
+
   pub_diagnostics_->publish(arr);
 }
 

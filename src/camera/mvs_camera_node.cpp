@@ -88,6 +88,8 @@ MvsCameraNode::MvsCameraNode(const rclcpp::NodeOptions& options)
   safe_param("frame_rate", frame_rate_);
   safe_param("output_width", output_width_);
   safe_param("output_height", output_height_);
+  safe_param("output_offset_x", output_offset_x_);
+  safe_param("output_offset_y", output_offset_y_);
 
   if (timestamp_mode_ != "capture" && timestamp_mode_ != "publish") {
     RCLCPP_WARN(this->get_logger(),
@@ -221,23 +223,133 @@ bool MvsCameraNode::open_device()
   //    ⇒ 换尺寸 = 重标定，别当成纯性能开关。
   // ⚠️ 必须在设像素格式**之前**做：改尺寸会让格式设置失效，顺序反了就白设。
   if (output_width_ > 0 && output_height_ > 0) {
-    const int rw = MV_CC_SetIntValueEx(handle_, "Width",  output_width_);
-    const int rh = MV_CC_SetIntValueEx(handle_, "Height", output_height_);
-    MVCC_INTVALUE_EX ivw, ivh;
-    const int gw = MV_CC_GetIntValueEx(handle_, "Width", &ivw);
-    const int gh = MV_CC_GetIntValueEx(handle_, "Height", &ivh);
-    if (rw == MV_OK && rh == MV_OK) {
-      RCLCPP_INFO(this->get_logger(),
-        "输出尺寸设为 %ldx%ld（搬运量 %.1f MB/帧）—— ⚠️ 内参随之改变，标定要用同一个 ROI",
-        static_cast<long>(gw == MV_OK ? ivw.nCurValue : output_width_),
-        static_cast<long>(gh == MV_OK ? ivh.nCurValue : output_height_),
-        (gw == MV_OK ? ivw.nCurValue : output_width_) *
-        (gh == MV_OK ? ivh.nCurValue : output_height_) * 3.0 / 1e6);
-    } else {
+    // ── 先按相机的 min/max/**步进**把四个值吸附到合法档 ──
+    //    ⚠️⚠️ **为什么必须吸附**: GenICam 的 `Width/Height/OffsetX/OffsetY` 各自
+    //       带一个**步进** `nInc`（本机这台 Width 范围 32~1624、Height 32~1240，
+    //       步进未实测）。不合步进时相机**很可能静默回退**而不是报错 ——
+    //       而 ROI 是**内参的一部分**，回退就意味着"标定用的那块和配置写的那块
+    //       不是同一块"，且不报错。
+    //    ⚠️ 吸附会**改变数值**（最多 nInc−1 px，那点偏移直接进 `cx/cy`）
+    //       ⇒ 下面**必须把最终值打出来**，只打请求值等于没说。
+    //    ⚠️ 这也是 `output_width/height` 这条路径**第一次真被跑**：
+    //       `camera_bringup.launch.py` 在此之前**从不传**这三个参数。
+    auto snap = [&](const char* key, int& want) -> bool {
+      MVCC_INTVALUE_EX iv;
+      if (MV_CC_GetIntValueEx(handle_, key, &iv) != MV_OK) return false;
+      const long lo  = static_cast<long>(iv.nMin);
+      const long hi  = static_cast<long>(iv.nMax);
+      const long inc = std::max<long>(1, static_cast<long>(iv.nInc));
+      long v = std::max(lo, std::min(static_cast<long>(want), hi));
+      if (inc > 1) {
+        v = lo + ((v - lo + inc - 1) / inc) * inc;      // 向上取到步进整数倍
+        if (v > hi) v = lo + ((hi - lo) / inc) * inc;   // 越界则退回最大的合法档
+      }
+      if (v != static_cast<long>(want)) {
+        RCLCPP_WARN(this->get_logger(),
+          "%s: 请求 %d 不是合法档（范围 %ld~%ld, 步进 %ld）⇒ 吸附到 %ld。"
+          "⚠️ 若这是 OffsetX/OffsetY, 主点会跟着平移这么多像素 ⇒ **配置里的值要改成 %ld**",
+          key, want, lo, hi, inc, v, v);
+        want = static_cast<int>(v);
+      }
+      return true;
+    };
+    const bool ok_sx = snap("OffsetX", output_offset_x_);
+    const bool ok_sy = snap("OffsetY", output_offset_y_);
+    const bool ok_sw = snap("Width",   output_width_);
+    const bool ok_sh = snap("Height",  output_height_);
+    if (!ok_sx) output_offset_x_ = 0;      // 读不到描述子 ⇒ 宁可不动偏移（见下）
+    if (!ok_sy) output_offset_y_ = 0;
+
+    // ── ⚠️⚠️ Bayer 相位: 偏移**必须是偶数** ──
+    //   本节点收 `BayerRG8` 然后在**主机侧**按**固定相位** debayer（`debayer_ = "RG"`）。
+    //   Bayer 的 2×2 图案是 **RG / GB 逐行交替** —— 裁掉**奇数**行或列之后，
+    //   交付图的第一行/第一列**不再是 R 行 / R 列** ⇒ 固定的 `COLOR_BayerRG2BGR`
+    //   解出来**红蓝互换**，而它**不会报错**（跟 `debayer_` 写错是同一类故障）。
+    //   ⇒ 强制拉平到偶数（最多挪 1 px，进 `cx/cy` 的量可忽略，但**必须打出来**）。
+    auto force_even = [&](const char* key, int& v) {
+      if (v % 2 != 0) {
+        RCLCPP_WARN(this->get_logger(),
+          "%s=%d 是**奇数** ⇒ Bayer 相位会翻转（固定相位 debayer 会红蓝互换且不报错）"
+          " ⇒ 拉平到 %d。⚠️ 配置里改成 %d", key, v, v - 1, v - 1);
+        v -= 1;
+      }
+    };
+    force_even("OffsetX", output_offset_x_);
+    force_even("OffsetY", output_offset_y_);
+
+    if (!ok_sw || !ok_sh) {
       RCLCPP_WARN(this->get_logger(),
-        "设 Width/Height=%d/%d 失败（0x%08x/0x%08x %s）⇒ **仍是全分辨率**（6MB/帧），"
-        "帧率上不去；且此时内参与配置**对不上**",
-        output_width_, output_height_, rw, rh, err_name(rw != MV_OK ? rw : rh));
+        "读不到 Width/Height 的合法范围 ⇒ **不设 ROI**（保持原生全幅）。"
+        "此时内参按全幅标, 与配置的 resolution 不符 —— 见 check 的尺寸链");
+    }
+
+    // ⚠️⚠️ **偏移必须显式设, 而且必须在 Width/Height 之前**。
+    //    GenICam 的 `OffsetX/OffsetY` 默认 **0** ⇒ 只设 Width/Height 得到的是
+    //    **左上角**那块, 不是中间那块。后果不是"画面小一点", 是**光轴跑到右下**
+    //    （FOV 偏轴、主点不在图心）—— 而它**不报错**。
+    //    先定左上角再定宽高是 GenICam 的要求, 反了可能被判越界而回退。
+    const bool want_roi = ok_sw && ok_sh;
+    int rox = MV_OK, roy = MV_OK, rw = MV_OK, rh = MV_OK;
+    if (want_roi) {
+      rox = MV_CC_SetIntValueEx(handle_, "OffsetX", output_offset_x_);
+      roy = MV_CC_SetIntValueEx(handle_, "OffsetY", output_offset_y_);
+      rw  = MV_CC_SetIntValueEx(handle_, "Width",   output_width_);
+      rh  = MV_CC_SetIntValueEx(handle_, "Height",  output_height_);
+    }
+
+    // ── 读回**四个**再对一遍 ──
+    //    ⚠️ 这是**唯一**能知道"实际 ROI 到底是哪块"的手段: 相机可以对越界/不合
+    //       步进的值**静默回退**(而不是报错), 也可能接受 Width/Height 却拒绝 Offset。
+    //       内参是按 ROI 定的 ⇒ 这里读回来的才是"该拿哪份内参"的事实源。
+    auto get_int = [&](const char* key, long& out) -> bool {
+      MVCC_INTVALUE_EX iv;
+      if (MV_CC_GetIntValueEx(handle_, key, &iv) != MV_OK) return false;
+      out = static_cast<long>(iv.nCurValue);
+      return true;
+    };
+    long gx = -1, gy = -1, gw = -1, gh = -1;
+    const bool ok_x = get_int("OffsetX", gx);
+    const bool ok_y = get_int("OffsetY", gy);
+    const bool ok_w = get_int("Width",   gw);
+    const bool ok_h = get_int("Height",  gh);
+
+    if (want_roi && rw == MV_OK && rh == MV_OK && rox == MV_OK && roy == MV_OK
+        && ok_x && ok_y && ok_w && ok_h
+        && gx == output_offset_x_ && gy == output_offset_y_
+        && gw == output_width_    && gh == output_height_) {
+      RCLCPP_INFO(this->get_logger(),
+        "输出 ROI = %ldx%ld @ 偏移(%ld, %ld)（搬运量 %.1f MB/帧）"
+        " —— ⚠️ 内参必须按**这一块**标定",
+        gw, gh, gx, gy, static_cast<double>(gw) * gh * 3.0 / 1e6);
+    } else {
+      // ⚠️ 三种失败的**内参后果不一样**, 分开报 —— 报混了会让人按错的那份去标:
+      //    ① 压根没请求 ROI（描述子读不到）⇒ 全分辨率。图是完整的, 与配置不符。
+      //    ② 偏移没设上、尺寸设上了  ⇒ **左上角裁**。最阴的一档: 尺寸与配置**对得上**,
+      //       不报错, 只有光轴偏了 —— 投影会系统性偏（那 40/80 分）。
+      //    ③ 都没设上 ⇒ 同 ①。
+      if (!want_roi) {
+        RCLCPP_WARN(this->get_logger(),
+          "**未请求 ROI**（读不到 Width/Height 的合法范围）⇒ 保持原生全幅。"
+          "此时内参按**全幅**标, 与 camera_hardware.yaml 的 resolution 不符 —— 先对齐再标");
+      } else {
+        RCLCPP_WARN(this->get_logger(),
+          "设 ROI 失败或**被相机回退** —— 请求 %dx%d @ (%d, %d)，实际读到 %ldx%ld @ (%ld, %ld)。"
+          "set 返回 Width/Height=0x%08x/0x%08x、OffsetX/Y=0x%08x/0x%08x %s。",
+          output_width_, output_height_, output_offset_x_, output_offset_y_,
+          gw, gh, gx, gy, rw, rh, rox, roy,
+          err_name(rw != MV_OK ? rw : (rh != MV_OK ? rh : (rox != MV_OK ? rox : roy))));
+        if (gw == output_width_ && gh == output_height_
+            && (gx != output_offset_x_ || gy != output_offset_y_)) {
+          RCLCPP_ERROR(this->get_logger(),
+            "⇒⚠️⚠️ **尺寸对上了但偏移没对上** —— 这是**左上角裁切**，FOV 偏轴、"
+            "光轴落在画幅右下。此时**内参必须是这一块（含偏移）标出来的**，"
+            "拿居中裁/全幅的内参来用会系统性偏，且不会报错。");
+        } else {
+          RCLCPP_WARN(this->get_logger(),
+            "⇒ 实际 ROI 与请求不符（可能仍是全分辨率，6MB/帧）。"
+            "**config/camera_hardware.yaml 的 resolution/roi 与实际不符** —— 标定前先对齐。");
+        }
+      }
     }
   }
 

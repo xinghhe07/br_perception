@@ -220,6 +220,10 @@ void CameraDepthNode::depth_callback(const sensor_msgs::msg::Image::SharedPtr ms
   const auto t0 = std::chrono::steady_clock::now();
   ++frame_seq_;
 
+  // 年龄仪器（2026-09-26 加）—— 语义与键名**与雷达/工业相机那两路逐字对齐**。
+  // ⚠️ 用 `msg->header.stamp`（RealSense 给的曝光/采集时刻），不是到达时刻。
+  last_frame_age_sec_ = (this->now() - rclcpp::Time(msg->header.stamp)).seconds();
+
   // 帧到了 → 刷新"流还活着"的时间戳（兜底心跳 idle_diag_tick 据此判断）
   {
     std::lock_guard<std::mutex> lock(frame_mutex_);
@@ -377,6 +381,48 @@ void CameraDepthNode::publish_diagnostics(double proc_ms, bool valid, bool found
   kv("frame_seq", std::to_string(frame_seq_));
 
   arr.status.push_back(s);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ⚠️ 端到端**年龄**（2026-09-26 加）—— **与雷达、工业相机两路同口径同键名**。
+  //
+  //   上面那条 `camera_depth` 报的是 `proc_ms`（**本节点处理花了多久**）；
+  //   这条回答的是**另一个问题**：「这帧深度图到我手上时已经旧了多少」。
+  //   延迟预算按后者算，而本节点此前**根本没有这个量** ⇒ 「三路总延迟」
+  //   里 D435i 这一路无从计入。
+  //
+  //   ⚠️ D435i 在**判色（40/80 分）**的关键路径上，不该是盲区。
+  //
+  //   ⚠️⚠️ 键名 `age_newest_ms` **必须与另外两路逐字一致** ——
+  //      名字不一致的"对齐"本身就在制造歧义。
+  //   ⚠️ D435i 整帧在同一瞬间曝光 ⇒ 只有"最新=最旧"一个 age，
+  //      不像雷达那样要分两个（那是雷达一帧横跨 100ms 才有的问题）。
+  //
+  //   ⚠️ 阈值 56/80 与 `config/perception_params.yaml` 的
+  //      `latency_warn_ms` / `latency_error_ms` 同源，改那边要一起改。
+  // ═══════════════════════════════════════════════════════════════════════════
+  diagnostic_msgs::msg::DiagnosticStatus lx;
+  lx.name = "end_to_end_latency";
+  lx.hardware_id = "D435i";
+
+  const double age_ms = last_frame_age_sec_ * 1000.0;
+  if (age_ms < 56.0) {
+    lx.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
+    lx.message = "Latency OK";
+  } else if (age_ms < 80.0) {
+    lx.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+    lx.message = "Latency over warn (56ms)";
+  } else {
+    lx.level = diagnostic_msgs::msg::DiagnosticStatus::ERROR;
+    lx.message = "Latency over error (80ms)";
+  }
+  auto kv2 = [&lx](const char* k, const std::string& v) {
+    diagnostic_msgs::msg::KeyValue e; e.key = k; e.value = v; lx.values.push_back(e);
+  };
+  kv2("age_newest_ms", std::to_string(age_ms));
+  // ⚠️ `frame_seq_ == 0`（一帧都没来过）时 age 是 0，会被读成"延迟极好" ——
+  //    把序号一并报出来，免得那个 0 被当成好数。真正判"有没有数据"看上面那条的 `valid`。
+  kv2("frame_seq", std::to_string(frame_seq_));
+  arr.status.push_back(lx);
 
   std::lock_guard<std::mutex> lock(diag_mutex_);
   pub_diagnostics_->publish(arr);

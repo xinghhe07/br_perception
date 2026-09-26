@@ -42,6 +42,22 @@ perception_pipeline:
     #    "通信断开 → 缓存补发"是 comm_node 的活（它持有串口），不在这里做。
     comm_diag_topic: "/communication/diagnostics"
 
+    # ── 天空方块判色（模块 9，2026-09-24 接进来）──
+    #   ⚠️⚠️ **为什么本节点要订它**：那 40/80 分的归属**只由塔顶天空方块的朝上颜色决定**
+    #      （规则 3.5.6/3.5.7），而**雷达对颜色无能为力**（`building_spot_analyzer` 原文
+    #      "完整塔: 雷达无法判断天空方块朝上颜色"）⇒ 不接这一路，主控拿到的
+    #      `BuildingSpot.top_color` 就**永远是 UNKNOWN(3)**，塔顶隶属谁都判不出来。
+    #   ⚠️ 两路各订一份：**判色主力是长焦**（200mm 方块在 5m 处：宽角约 18px、长焦 50px+，
+    #      见任务书 §十三 传感器互补表）；宽角是冗余。
+    #   ⚠️ 两路**都给 CONFIRMED 且颜色不一致**时，本节点**保守报未知**（不猜）——
+    #      错色的代价是把塔的归属判反。
+    sky_block_wide_topic: "/perception/camera/sky_blocks_wide"
+    sky_block_tele_topic: "/perception/camera/sky_blocks_tele"
+    # ⚠️ 相机颜色多久没更新就不再采信 [s] —— **塔会被对手翻**（规则 3.5.8），
+    #    拿几秒前的颜色报"现在塔顶什么色"就是把旧状态当现状。
+    #    量级按"相机 30Hz + 相机通路延迟 ≈43ms"取 0.5s（留足丢帧余量）。
+    sky_block_timeout_sec: 0.5
+
     # 融合层的穆斯蒂卡状态（`std_msgs/UInt8`，发布端 = `mustika_pillar_check`，模块 20）。
     # ⚠️ **目前还没有发布者** —— 这一路恒不触发，`mustika_state` 仍是 0=未知。
     #    补这条订阅是为了**把链接上**：在那之前，那个节点的结论**再对也到不了主控**

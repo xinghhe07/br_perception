@@ -513,6 +513,25 @@ void LidarPerceptionNode::cloud_callback(
   }
   consecutive_empty_frames_ = 0;
 
+  // ── 年龄仪器（2026-09-26 加；语义见 `PipelineTiming` 的那段注释）──
+  //    ⚠️ 放在**这里**（空帧判之后、换系之前）是有意的：
+  //      · 空帧不算 —— 它没有"数据有多旧"可言，也不该推进 `prev_input_stamp_`；
+  //      · 换系失败那条早退路径**要**带上年龄（那时更该知道数据有多旧），
+  //        所以必须排在它**之前**。
+  const rclcpp::Time in_stamp(msg->header.stamp);
+  double in_period_ms = 0.0;
+  if (prev_input_stamp_.nanoseconds() > 0) {
+    in_period_ms = (in_stamp - prev_input_stamp_).seconds() * 1000.0;
+  }
+  prev_input_stamp_ = in_stamp;
+
+  // ⚠️ `timing` 必须在**换系之前**就建好并填上年龄 —— 换系失败那条早退路径
+  //    也要能发诊断（见下面 `publish_diagnostics(timing, ...)` 那段注释）。
+  PipelineTiming timing;
+  timing.input_points = static_cast<int>(raw_cloud->size());
+  timing.input_stamp  = in_stamp;
+  timing.period_ms    = in_period_ms;
+
   // ═══════════════════════════════════════════════════════════════════════
   // [0] **搬到场地系**（2026-09-24 立；理由见头文件「坐标系纪律」那段）
   //
@@ -532,6 +551,14 @@ void LidarPerceptionNode::cloud_callback(
       "② 里程计还没出第一帧；③ `world_frame` 参数与实际 TF 树上的名字不符",
       world_frame_.c_str(), msg->header.frame_id.c_str());
     publish_all_unknown(msg->header, "point cloud not in world frame");
+    // ⚠️⚠️ 2026-09-26 加：**早退路径也要发诊断**。
+    //   原实现在这里直接 `return` ⇒ 只要换系一直失败（比如 `perception_pipeline`
+    //   没起、没人广播 `world→odom`），`/perception/lidar/diagnostics`
+    //   **一个发布者、一帧都不发** —— 而"每帧都换不过去"正是最该被看见的情况。
+    //   实测踩到（本机 2026-09-26）：`bringup_lidar_only` 不起 `perception_pipeline`
+    //   ⇒ 雷达链 100% 走这条早退 ⇒ 诊断话题**完全静默**，连"雷达在不在"都看不出来。
+    //   ⇒ 至少把 `input_points` 与**年龄**报出去（那正是"数据有多旧"最要紧的时候）。
+    publish_diagnostics(timing, LidarPerceptionResult{});
     return;
   }
 
@@ -545,8 +572,7 @@ void LidarPerceptionNode::cloud_callback(
   }
   const std::string& output_frame = world_header.frame_id;
 
-  PipelineTiming timing;
-  timing.input_points = static_cast<int>(raw_cloud->size());
+  // ⚠️ `timing` 已在换系之前建好（那里要填年龄）—— 这里**不要再声明一次**。
 
   // ═══════════════════════════════════════════════════════════════════════
   // [1] 预处理（⚠️ 喂**场地系**那份 —— ROI 的 z 上下限是绝对高度）
@@ -1913,6 +1939,74 @@ void LidarPerceptionNode::publish_diagnostics(
   add("l2_points", static_cast<double>(result.l2_points));
 
   arr.status.push_back(st);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ⚠️⚠️ 端到端**年龄**（2026-09-26 加）—— **单开一条**，不塞进 `pipeline_timing`。
+  //
+  //    上面那条里头**全是处理耗时**（各段花了多久）；这一条回答的是**另一个问题**：
+  //    「这帧数据到我手上时已经旧了多少」—— **延迟预算是按后者算的**。
+  //
+  //    ⚠️ 为什么单开一条而不是并进 `pipeline_timing`：
+  //       那条的 `level` 语义是「本帧算得快不快」，下游和人已经按那个读；
+  //       把年龄混进去会**改掉它的语义**（同一个 `level` 两个含义）。
+  //       分开表达才能分清「算得慢」和「数据旧」—— 那是两件事、两个动作。
+  //
+  //    怎么读（**这里踩过一次坑，记下来**）：
+  //      · `header.stamp` 是**扫描开始**（驱动 `lddc.cpp:289` 用 `pkg.base_time`）
+  //        ⇒ `now − stamp` 是**最旧那个点**的年龄；
+  //      · 雷达与相机**结构不同**：相机整帧在同一瞬间曝光（最旧=最新），
+  //        而 Mid-360 一帧横跨 **100ms** ⇒ 两端差一整个帧周期。
+  //      ⇒ 报**两个**：`age_newest_ms`（与相机 `frame_age_sec` 同口径，**主看它**）
+  //        和 `age_oldest_ms`。**不要**写成 `age + period` —— 那是算两遍，
+  //        本诊断第一版就这么写的，实测虚报了一整个帧周期（256ms vs 实际 ~56ms）。
+  //
+  //    ⚠️ 阈值 56/80 与 `config/perception_params.yaml` 的
+  //       `latency_warn_ms` / `latency_error_ms` **同源**（那里写着
+  //       "warn 56 = §15.3 的 max(雷达 34, 视觉 46) + 10"）。
+  //       ⚠️ 改那边要一起改这里 —— 本节点没有那两个参数，只能硬编码。
+  // ═══════════════════════════════════════════════════════════════════════════
+  if (timing.input_stamp.nanoseconds() > 0) {
+    diagnostic_msgs::msg::DiagnosticStatus lx;
+    lx.name = "end_to_end_latency";
+    lx.hardware_id = "mid360";
+
+    // ⚠️⚠️ **`header.stamp` 是"扫描开始"，不是"扫描结束"**（2026-09-26 核实）：
+    //   驱动里是 `timestamp = pkg.base_time;`（`lddc.cpp:289/331`）——
+    //   `base_time` 是该帧**第一个点**的时刻。
+    //   ⇒ `now - input_stamp` = **最旧那个点**的年龄；最新那个点比它新一整个帧周期。
+    //
+    //   ⚠️ 所以**不能**写成 `age + period`（那是把帧周期算两遍）——
+    //      本诊断的第一版就是这么写的，实测报出 256ms，而按同口径只有 ~56ms，
+    //      **虚报了一整个帧周期**。看数的人会据此去做错误的取舍。
+    const double age_oldest_ms = (this->now() - timing.input_stamp).seconds() * 1000.0;
+    const double age_newest_ms = std::max(0.0, age_oldest_ms - timing.period_ms);
+
+    // 告警看**最新那个点**（与相机侧 `frame_age_sec` 同口径：都是"最新数据有多旧"）
+    const double watch_ms = age_newest_ms;
+    if (watch_ms < 56.0) {
+      lx.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
+      lx.message = "Latency OK";
+    } else if (watch_ms < 80.0) {
+      lx.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+      lx.message = "Latency over warn (56ms)";
+    } else {
+      lx.level = diagnostic_msgs::msg::DiagnosticStatus::ERROR;
+      lx.message = "Latency over error (80ms)";
+    }
+
+    auto addl = [&lx](const std::string& k, double v) {
+      diagnostic_msgs::msg::KeyValue kv; kv.key = k;
+      kv.value = std::to_string(v); lx.values.push_back(kv);
+    };
+    // ⚠️ 两项**都要报**，而且名字要说清是哪一端 —— 一帧点云横跨一整个帧周期，
+    //    "最旧"和"最新"差 100ms，只报一个必然被误读（本诊断第一版就栽在这）。
+    addl("age_newest_ms", age_newest_ms);   // ⭐ 与相机同口径，**看这个**
+    addl("age_oldest_ms", age_oldest_ms);   // 该帧最早那个点有多旧
+    addl("period_ms",     timing.period_ms); // 传感器帧周期（Mid-360 ≈ 100ms）
+
+    arr.status.push_back(lx);
+  }
+
   pub_diagnostics_->publish(arr);
 }
 

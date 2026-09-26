@@ -77,7 +77,8 @@
     # 全部消费者：`health_monitor`（模块 26，⬜ **尚未编写**）。
     # 接线到期条件：**health_monitor 落地时**。在那之前改它们不会有任何行为变化。
     # ⚠️ 方向别搞反：调试开关比赛时关，热管理比赛时**保持开启**
-    #    （无风扇的迷你主机会降频，要靠它保命）。
+    #    （本机 GMKtec NucBox K6 长时间跑会降频，要靠它保命 ——
+    #      原文写"无风扇的迷你主机"，而"无风扇"**未复核**，2026-09-25 记）。
 
     thermal_management_enabled: true
     cpu_temp_warn_threshold: 85.0      # 触发降级的温度 [°C]
@@ -129,16 +130,32 @@
 # ✅ 已传：`comm_node`（2026-09-23 挂进 `bringup_full` 第 7 节，可用 `comm:=false` 关掉）
 #
 # ═══════════════════════════════════════════════════════════════════════════════
-# ⚠️ 已知缺口：本闸**管不到**的可视化输出（2026-09-23 核实，尚未接线）
+# ✅ 已处置（2026-09-24）：`publish_intermediate(...)` —— **但故意不挂在本闸下**
 # ═══════════════════════════════════════════════════════════════════════════════
-# `lidar_perception_node.cpp:431` 的 `publish_intermediate(...)` **无条件每帧执行**，
-# 不受 `debug_enabled` 约束 —— 而它发的是**纯可视化**内容：
-#   · MarkerArray ×3: /perception/lidar/{pillars, obstacles, building_spots}
-#   · 点云 ×6: filtered / ground / non_ground / l0_surface / l1_surface / l2_surface
-#   · 平面系数: /perception/lidar/ground_plane
+# 2026-09-23 曾把 `lidar_perception_node.cpp` 的 `publish_intermediate(...)`（10 条话题）
+# 挂到 `debug_enabled` 下，**依据是一张"代码订阅者 0"的表 —— 那张表是错的**。
 #
-# ⇒ **"比赛时全部关闭以节省性能"目前只关掉了调试点云一条**，上面这些照发。
-#   其中 l0/l1/l2_surface + ground_plane 更是**全仓库零订阅者**的孤儿话题
-#   （台账 §四已记），却每帧发三份 PointCloud2。
-#   ⚠️ 把它们挂到 `debug_enabled` 是本闸的应有之义，但**改了会动雷达主节点的
-#      每帧路径**（且容器化重构正在重写雷达层）→ **留待联调期一起做**，别单独改。
+# 2026-09-24 逐条实测（**看 `create_subscription` 那个调用块**数出来的，
+# 表在 `lidar_perception_node.cpp` 调用处；复核跑 `scripts/check_topic_consumers.py`）：
+#   · filtered          → **1** 个代码订阅者（ground_segmenter）  ← **是数据接口**
+#   · non_ground        → **3**（building_spot_analyzer / cluster_extractor /
+#                                cylinder_detector）              ← **是数据接口**
+#   · ground / l0_surface / l1_surface / l2_surface /
+#     ground_plane / pillars / obstacles / building_spots / debug_cloud → **各 0**
+#
+# ⚠️ 中间走过一次弯路：先用 `grep -l "<话题>" src/` 数，得出"10 条里 9 条有订阅者"
+#    —— 那是错的，`grep -l` **把发布者也数进去了**。10 条里其实是 **2 条**数据接口。
+#
+# ⇒ 处置：**拆成两半**（2026-09-24）——
+#    · 那 2 条数据接口 ⇒ 挂 **`publish_intermediate_topics`**（默认 **true**）。
+#      ⚠️ 它**故意不放进本文件** —— 本文件的职责是"比赛时全部关闭"，
+#      把一个默认"发"的数据接口开关放进来，等于请人把它当调试开关关掉。
+#      它现在在 `config/lidar_params.yaml`（连同"为什么不在本文件"的理由）。
+#    · 那 8 条纯可视化 ⇒ **留在本闸下**（`debug_enabled`）—— 关掉没人饿死。
+#   ⇒ 比赛模式下中间结果只剩 **2 次**整份点云拷贝（原来 6 次）。
+#
+# ⚠️ **纪律（2026-09-24 立；台账 §八 有账）**：
+#    **把一个话题挂到任何开关下之前，先列出它的订阅者。**
+#    · 数据话题（有订阅者）→ `publish_intermediate_topics` 这类**拓扑开关**
+#    · 纯可视化（零订阅者）→ 本闸 `debug_enabled`
+#    这条动作已自动化：`python3 scripts/check_topic_consumers.py`

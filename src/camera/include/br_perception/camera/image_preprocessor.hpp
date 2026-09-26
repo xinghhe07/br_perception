@@ -270,7 +270,14 @@ private:
   bool   wide_clahe_enabled_{true};
   double wide_clahe_clip_{2.0};
   int    wide_clahe_tile_{8};
+  /// ⚠️ 默认值必须与 `camera_params.yaml` 的 `wide_roi` / 相机实际输出一致 ——
+  ///    它是**参数缺失时的兜底**，而 ROI 是内参的一部分（裁切平移主点）。
   std::vector<int64_t> wide_roi_{0, 0, 1280, 720};
+  /// ⚠️⚠️ **死状态**（2026-09-26 核实）：声明 + 读参 + clamp 之后再无消费者，
+  ///    本文件与 .cpp 全无引用。出界兜底靠 `sky_block_detector.cpp` 的
+  ///    `roi & cv::Rect(0,0,cols,rows)` 求交，不靠它。**别在这上面加逻辑** ——
+  ///    真要恢复做尺寸校验，先看清它现在**记的是错的**（两路尺寸已不同：
+  ///    wide 1280×720 / tele 1624×976，而这里只有一对单值）。
   int    wide_orig_w_{1280};
   int    wide_orig_h_{720};
 
@@ -280,7 +287,12 @@ private:
   bool   tele_clahe_enabled_{true};
   double tele_clahe_clip_{2.0};
   int    tele_clahe_tile_{8};
-  std::vector<int64_t> tele_roi_{0, 0, 1280, 720};
+  /// ⚠️ 默认值必须与 `camera_params.yaml` 的 `tele_roi` / 相机实际输出一致。
+  ///    2026-09-26: 长焦改成**相机内裁**到 1624×976（见 `camera_hardware.yaml`
+  ///    的 `camera_tele.roi`）⇒ 相机输出即该尺寸，这里写全图（命中 `crop_roi`
+  ///    的全图短路、不再裁）。**改尺寸必须两边一起改**。
+  std::vector<int64_t> tele_roi_{0, 0, 1624, 976};
+  /// ⚠️⚠️ **死状态** —— 同上面的 `wide_orig_*`，见那段注释
   int    tele_orig_w_{1280};
   int    tele_orig_h_{720};
 

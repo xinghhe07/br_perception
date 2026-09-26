@@ -300,6 +300,15 @@ private:
   double last_assembly_ms_{0.0};
   size_t last_populated_{0};
   size_t last_stale_count_{0};
+  /// 最近一次组帧时**最新槽数据的年龄** [s] —— 与发出去的
+  /// `CameraFrame.frame_age_sec` **同源同值**，只是留一份给诊断用。
+  ///
+  /// ⚠️ 2026-09-26 加：雷达那路（`lidar_perception_node`）新开了一条
+  /// `end_to_end_latency` 诊断条目，这里补上**同口径**的一份 ——
+  /// 否则对"三路总延迟"要跑两种工具（一个看数据消息、一个看诊断）才能对账。
+  /// ⚠️ 名字与语义**必须与雷达那边逐字对齐**（`age_newest_ms`），
+  ///    不然"对着看"本身就制造歧义。
+  double last_frame_age_sec_{0.0};
 
   /// @brief 上次发诊断的**单调时钟**时刻 —— ⚠️ 不用 ROS 时间：仿真里会暂停/跳变
   std::chrono::steady_clock::time_point last_diag_time_;

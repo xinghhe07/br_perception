@@ -185,125 +185,125 @@
       <visual name="v"><geometry><cylinder><radius>0.135</radius><height>0.8</height></cylinder></geometry><material><ambient>0.392 0.243 0.000 1.00</ambient><diffuse>0.392 0.243 0.000 1.00</diffuse></material></visual>
       <collision name="c"><geometry><cylinder><radius>0.135</radius><height>0.8</height></cylinder></geometry></collision>
     </link>
-    <link name="sky_00_0">
-      <pose>5.0333 0.8333 0.1 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.2 0.1 0.2</size></box></geometry><material><ambient>0.875 0.133 0.133 1.00</ambient><diffuse>0.875 0.133 0.133 1.00</diffuse></material></visual>
-      <collision name="c"><geometry><box><size>0.2 0.1 0.2</size></box></geometry></collision>
+    <link name="sky_00_bottom_blue">
+      <pose>5.0333 0.7833 0.05 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.2 0.2 0.1</size></box></geometry><material><ambient>0.196 0.000 1.000 1.00</ambient><diffuse>0.196 0.000 1.000 1.00</diffuse></material></visual>
+      <collision name="c"><geometry><box><size>0.2 0.2 0.1</size></box></geometry></collision>
     </link>
-    <link name="sky_00_1">
-      <pose>5.0333 0.7333 0.1 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.2 0.1 0.2</size></box></geometry><material><ambient>0.196 0.000 1.000 1.00</ambient><diffuse>0.196 0.000 1.000 1.00</diffuse></material></visual>
-      <collision name="c"><geometry><box><size>0.2 0.1 0.2</size></box></geometry></collision>
+    <link name="sky_00_top_red">
+      <pose>5.0333 0.7833 0.15 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.2 0.2 0.1</size></box></geometry><material><ambient>0.875 0.133 0.133 1.00</ambient><diffuse>0.875 0.133 0.133 1.00</diffuse></material></visual>
+      <collision name="c"><geometry><box><size>0.2 0.2 0.1</size></box></geometry></collision>
     </link>
-    <link name="sky_01_0">
-      <pose>5.55 0.7833 0.1 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.1 0.2 0.2</size></box></geometry><material><ambient>0.875 0.133 0.133 1.00</ambient><diffuse>0.875 0.133 0.133 1.00</diffuse></material></visual>
-      <collision name="c"><geometry><box><size>0.1 0.2 0.2</size></box></geometry></collision>
+    <link name="sky_01_bottom_blue">
+      <pose>5.5 0.7833 0.05 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.2 0.2 0.1</size></box></geometry><material><ambient>0.196 0.000 1.000 1.00</ambient><diffuse>0.196 0.000 1.000 1.00</diffuse></material></visual>
+      <collision name="c"><geometry><box><size>0.2 0.2 0.1</size></box></geometry></collision>
     </link>
-    <link name="sky_01_1">
-      <pose>5.45 0.7833 0.1 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.1 0.2 0.2</size></box></geometry><material><ambient>0.196 0.000 1.000 1.00</ambient><diffuse>0.196 0.000 1.000 1.00</diffuse></material></visual>
-      <collision name="c"><geometry><box><size>0.1 0.2 0.2</size></box></geometry></collision>
+    <link name="sky_01_top_red">
+      <pose>5.5 0.7833 0.15 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.2 0.2 0.1</size></box></geometry><material><ambient>0.875 0.133 0.133 1.00</ambient><diffuse>0.875 0.133 0.133 1.00</diffuse></material></visual>
+      <collision name="c"><geometry><box><size>0.2 0.2 0.1</size></box></geometry></collision>
     </link>
-    <link name="sky_02_0">
-      <pose>5.9667 0.7333 0.1 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.2 0.1 0.2</size></box></geometry><material><ambient>0.875 0.133 0.133 1.00</ambient><diffuse>0.875 0.133 0.133 1.00</diffuse></material></visual>
-      <collision name="c"><geometry><box><size>0.2 0.1 0.2</size></box></geometry></collision>
+    <link name="sky_02_bottom_blue">
+      <pose>5.9667 0.7833 0.05 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.2 0.2 0.1</size></box></geometry><material><ambient>0.196 0.000 1.000 1.00</ambient><diffuse>0.196 0.000 1.000 1.00</diffuse></material></visual>
+      <collision name="c"><geometry><box><size>0.2 0.2 0.1</size></box></geometry></collision>
     </link>
-    <link name="sky_02_1">
-      <pose>5.9667 0.8333 0.1 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.2 0.1 0.2</size></box></geometry><material><ambient>0.196 0.000 1.000 1.00</ambient><diffuse>0.196 0.000 1.000 1.00</diffuse></material></visual>
-      <collision name="c"><geometry><box><size>0.2 0.1 0.2</size></box></geometry></collision>
+    <link name="sky_02_top_red">
+      <pose>5.9667 0.7833 0.15 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.2 0.2 0.1</size></box></geometry><material><ambient>0.875 0.133 0.133 1.00</ambient><diffuse>0.875 0.133 0.133 1.00</diffuse></material></visual>
+      <collision name="c"><geometry><box><size>0.2 0.2 0.1</size></box></geometry></collision>
     </link>
-    <link name="sky_03_0">
-      <pose>5.3167 1.0167 0.1 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.1 0.2 0.2</size></box></geometry><material><ambient>0.875 0.133 0.133 1.00</ambient><diffuse>0.875 0.133 0.133 1.00</diffuse></material></visual>
-      <collision name="c"><geometry><box><size>0.1 0.2 0.2</size></box></geometry></collision>
+    <link name="sky_03_bottom_blue">
+      <pose>5.2667 1.0167 0.05 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.2 0.2 0.1</size></box></geometry><material><ambient>0.196 0.000 1.000 1.00</ambient><diffuse>0.196 0.000 1.000 1.00</diffuse></material></visual>
+      <collision name="c"><geometry><box><size>0.2 0.2 0.1</size></box></geometry></collision>
     </link>
-    <link name="sky_03_1">
-      <pose>5.2167 1.0167 0.1 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.1 0.2 0.2</size></box></geometry><material><ambient>0.196 0.000 1.000 1.00</ambient><diffuse>0.196 0.000 1.000 1.00</diffuse></material></visual>
-      <collision name="c"><geometry><box><size>0.1 0.2 0.2</size></box></geometry></collision>
+    <link name="sky_03_top_red">
+      <pose>5.2667 1.0167 0.15 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.2 0.2 0.1</size></box></geometry><material><ambient>0.875 0.133 0.133 1.00</ambient><diffuse>0.875 0.133 0.133 1.00</diffuse></material></visual>
+      <collision name="c"><geometry><box><size>0.2 0.2 0.1</size></box></geometry></collision>
     </link>
-    <link name="sky_04_0">
-      <pose>5.6833 1.0167 0.1 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.1 0.2 0.2</size></box></geometry><material><ambient>0.875 0.133 0.133 1.00</ambient><diffuse>0.875 0.133 0.133 1.00</diffuse></material></visual>
-      <collision name="c"><geometry><box><size>0.1 0.2 0.2</size></box></geometry></collision>
+    <link name="sky_04_bottom_blue">
+      <pose>5.7333 1.0167 0.05 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.2 0.2 0.1</size></box></geometry><material><ambient>0.196 0.000 1.000 1.00</ambient><diffuse>0.196 0.000 1.000 1.00</diffuse></material></visual>
+      <collision name="c"><geometry><box><size>0.2 0.2 0.1</size></box></geometry></collision>
     </link>
-    <link name="sky_04_1">
-      <pose>5.7833 1.0167 0.1 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.1 0.2 0.2</size></box></geometry><material><ambient>0.196 0.000 1.000 1.00</ambient><diffuse>0.196 0.000 1.000 1.00</diffuse></material></visual>
-      <collision name="c"><geometry><box><size>0.1 0.2 0.2</size></box></geometry></collision>
+    <link name="sky_04_top_red">
+      <pose>5.7333 1.0167 0.15 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.2 0.2 0.1</size></box></geometry><material><ambient>0.875 0.133 0.133 1.00</ambient><diffuse>0.875 0.133 0.133 1.00</diffuse></material></visual>
+      <collision name="c"><geometry><box><size>0.2 0.2 0.1</size></box></geometry></collision>
     </link>
-    <link name="sky_05_0">
-      <pose>5.0333 1.2 0.1 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.2 0.1 0.2</size></box></geometry><material><ambient>0.875 0.133 0.133 1.00</ambient><diffuse>0.875 0.133 0.133 1.00</diffuse></material></visual>
-      <collision name="c"><geometry><box><size>0.2 0.1 0.2</size></box></geometry></collision>
+    <link name="sky_05_bottom_blue">
+      <pose>5.0333 1.25 0.05 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.2 0.2 0.1</size></box></geometry><material><ambient>0.196 0.000 1.000 1.00</ambient><diffuse>0.196 0.000 1.000 1.00</diffuse></material></visual>
+      <collision name="c"><geometry><box><size>0.2 0.2 0.1</size></box></geometry></collision>
     </link>
-    <link name="sky_05_1">
-      <pose>5.0333 1.3 0.1 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.2 0.1 0.2</size></box></geometry><material><ambient>0.196 0.000 1.000 1.00</ambient><diffuse>0.196 0.000 1.000 1.00</diffuse></material></visual>
-      <collision name="c"><geometry><box><size>0.2 0.1 0.2</size></box></geometry></collision>
+    <link name="sky_05_top_red">
+      <pose>5.0333 1.25 0.15 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.2 0.2 0.1</size></box></geometry><material><ambient>0.875 0.133 0.133 1.00</ambient><diffuse>0.875 0.133 0.133 1.00</diffuse></material></visual>
+      <collision name="c"><geometry><box><size>0.2 0.2 0.1</size></box></geometry></collision>
     </link>
-    <link name="sky_06_0">
-      <pose>5.9667 1.3 0.1 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.2 0.1 0.2</size></box></geometry><material><ambient>0.875 0.133 0.133 1.00</ambient><diffuse>0.875 0.133 0.133 1.00</diffuse></material></visual>
-      <collision name="c"><geometry><box><size>0.2 0.1 0.2</size></box></geometry></collision>
+    <link name="sky_06_bottom_blue">
+      <pose>5.9667 1.25 0.05 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.2 0.2 0.1</size></box></geometry><material><ambient>0.196 0.000 1.000 1.00</ambient><diffuse>0.196 0.000 1.000 1.00</diffuse></material></visual>
+      <collision name="c"><geometry><box><size>0.2 0.2 0.1</size></box></geometry></collision>
     </link>
-    <link name="sky_06_1">
-      <pose>5.9667 1.2 0.1 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.2 0.1 0.2</size></box></geometry><material><ambient>0.196 0.000 1.000 1.00</ambient><diffuse>0.196 0.000 1.000 1.00</diffuse></material></visual>
-      <collision name="c"><geometry><box><size>0.2 0.1 0.2</size></box></geometry></collision>
+    <link name="sky_06_top_red">
+      <pose>5.9667 1.25 0.15 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.2 0.2 0.1</size></box></geometry><material><ambient>0.875 0.133 0.133 1.00</ambient><diffuse>0.875 0.133 0.133 1.00</diffuse></material></visual>
+      <collision name="c"><geometry><box><size>0.2 0.2 0.1</size></box></geometry></collision>
     </link>
-    <link name="sky_07_0">
-      <pose>5.2167 1.4833 0.1 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.1 0.2 0.2</size></box></geometry><material><ambient>0.875 0.133 0.133 1.00</ambient><diffuse>0.875 0.133 0.133 1.00</diffuse></material></visual>
-      <collision name="c"><geometry><box><size>0.1 0.2 0.2</size></box></geometry></collision>
+    <link name="sky_07_bottom_blue">
+      <pose>5.2667 1.4833 0.05 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.2 0.2 0.1</size></box></geometry><material><ambient>0.196 0.000 1.000 1.00</ambient><diffuse>0.196 0.000 1.000 1.00</diffuse></material></visual>
+      <collision name="c"><geometry><box><size>0.2 0.2 0.1</size></box></geometry></collision>
     </link>
-    <link name="sky_07_1">
-      <pose>5.3167 1.4833 0.1 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.1 0.2 0.2</size></box></geometry><material><ambient>0.196 0.000 1.000 1.00</ambient><diffuse>0.196 0.000 1.000 1.00</diffuse></material></visual>
-      <collision name="c"><geometry><box><size>0.1 0.2 0.2</size></box></geometry></collision>
+    <link name="sky_07_top_red">
+      <pose>5.2667 1.4833 0.15 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.2 0.2 0.1</size></box></geometry><material><ambient>0.875 0.133 0.133 1.00</ambient><diffuse>0.875 0.133 0.133 1.00</diffuse></material></visual>
+      <collision name="c"><geometry><box><size>0.2 0.2 0.1</size></box></geometry></collision>
     </link>
-    <link name="sky_08_0">
-      <pose>5.7833 1.4833 0.1 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.1 0.2 0.2</size></box></geometry><material><ambient>0.875 0.133 0.133 1.00</ambient><diffuse>0.875 0.133 0.133 1.00</diffuse></material></visual>
-      <collision name="c"><geometry><box><size>0.1 0.2 0.2</size></box></geometry></collision>
+    <link name="sky_08_bottom_blue">
+      <pose>5.7333 1.4833 0.05 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.2 0.2 0.1</size></box></geometry><material><ambient>0.196 0.000 1.000 1.00</ambient><diffuse>0.196 0.000 1.000 1.00</diffuse></material></visual>
+      <collision name="c"><geometry><box><size>0.2 0.2 0.1</size></box></geometry></collision>
     </link>
-    <link name="sky_08_1">
-      <pose>5.6833 1.4833 0.1 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.1 0.2 0.2</size></box></geometry><material><ambient>0.196 0.000 1.000 1.00</ambient><diffuse>0.196 0.000 1.000 1.00</diffuse></material></visual>
-      <collision name="c"><geometry><box><size>0.1 0.2 0.2</size></box></geometry></collision>
+    <link name="sky_08_top_red">
+      <pose>5.7333 1.4833 0.15 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.2 0.2 0.1</size></box></geometry><material><ambient>0.875 0.133 0.133 1.00</ambient><diffuse>0.875 0.133 0.133 1.00</diffuse></material></visual>
+      <collision name="c"><geometry><box><size>0.2 0.2 0.1</size></box></geometry></collision>
     </link>
-    <link name="sky_09_0">
-      <pose>5.0333 1.7667 0.1 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.2 0.1 0.2</size></box></geometry><material><ambient>0.875 0.133 0.133 1.00</ambient><diffuse>0.875 0.133 0.133 1.00</diffuse></material></visual>
-      <collision name="c"><geometry><box><size>0.2 0.1 0.2</size></box></geometry></collision>
+    <link name="sky_09_bottom_blue">
+      <pose>5.0333 1.7167 0.05 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.2 0.2 0.1</size></box></geometry><material><ambient>0.196 0.000 1.000 1.00</ambient><diffuse>0.196 0.000 1.000 1.00</diffuse></material></visual>
+      <collision name="c"><geometry><box><size>0.2 0.2 0.1</size></box></geometry></collision>
     </link>
-    <link name="sky_09_1">
-      <pose>5.0333 1.6667 0.1 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.2 0.1 0.2</size></box></geometry><material><ambient>0.196 0.000 1.000 1.00</ambient><diffuse>0.196 0.000 1.000 1.00</diffuse></material></visual>
-      <collision name="c"><geometry><box><size>0.2 0.1 0.2</size></box></geometry></collision>
+    <link name="sky_09_top_red">
+      <pose>5.0333 1.7167 0.15 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.2 0.2 0.1</size></box></geometry><material><ambient>0.875 0.133 0.133 1.00</ambient><diffuse>0.875 0.133 0.133 1.00</diffuse></material></visual>
+      <collision name="c"><geometry><box><size>0.2 0.2 0.1</size></box></geometry></collision>
     </link>
-    <link name="sky_10_0">
-      <pose>5.45 1.7167 0.1 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.1 0.2 0.2</size></box></geometry><material><ambient>0.875 0.133 0.133 1.00</ambient><diffuse>0.875 0.133 0.133 1.00</diffuse></material></visual>
-      <collision name="c"><geometry><box><size>0.1 0.2 0.2</size></box></geometry></collision>
+    <link name="sky_10_bottom_blue">
+      <pose>5.5 1.7167 0.05 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.2 0.2 0.1</size></box></geometry><material><ambient>0.196 0.000 1.000 1.00</ambient><diffuse>0.196 0.000 1.000 1.00</diffuse></material></visual>
+      <collision name="c"><geometry><box><size>0.2 0.2 0.1</size></box></geometry></collision>
     </link>
-    <link name="sky_10_1">
-      <pose>5.55 1.7167 0.1 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.1 0.2 0.2</size></box></geometry><material><ambient>0.196 0.000 1.000 1.00</ambient><diffuse>0.196 0.000 1.000 1.00</diffuse></material></visual>
-      <collision name="c"><geometry><box><size>0.1 0.2 0.2</size></box></geometry></collision>
+    <link name="sky_10_top_red">
+      <pose>5.5 1.7167 0.15 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.2 0.2 0.1</size></box></geometry><material><ambient>0.875 0.133 0.133 1.00</ambient><diffuse>0.875 0.133 0.133 1.00</diffuse></material></visual>
+      <collision name="c"><geometry><box><size>0.2 0.2 0.1</size></box></geometry></collision>
     </link>
-    <link name="sky_11_0">
-      <pose>5.9667 1.6667 0.1 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.2 0.1 0.2</size></box></geometry><material><ambient>0.875 0.133 0.133 1.00</ambient><diffuse>0.875 0.133 0.133 1.00</diffuse></material></visual>
-      <collision name="c"><geometry><box><size>0.2 0.1 0.2</size></box></geometry></collision>
+    <link name="sky_11_bottom_blue">
+      <pose>5.9667 1.7167 0.05 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.2 0.2 0.1</size></box></geometry><material><ambient>0.196 0.000 1.000 1.00</ambient><diffuse>0.196 0.000 1.000 1.00</diffuse></material></visual>
+      <collision name="c"><geometry><box><size>0.2 0.2 0.1</size></box></geometry></collision>
     </link>
-    <link name="sky_11_1">
-      <pose>5.9667 1.7667 0.1 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.2 0.1 0.2</size></box></geometry><material><ambient>0.196 0.000 1.000 1.00</ambient><diffuse>0.196 0.000 1.000 1.00</diffuse></material></visual>
-      <collision name="c"><geometry><box><size>0.2 0.1 0.2</size></box></geometry></collision>
+    <link name="sky_11_top_red">
+      <pose>5.9667 1.7167 0.15 0 0 0</pose>
+      <visual name="v"><geometry><box><size>0.2 0.2 0.1</size></box></geometry><material><ambient>0.875 0.133 0.133 1.00</ambient><diffuse>0.875 0.133 0.133 1.00</diffuse></material></visual>
+      <collision name="c"><geometry><box><size>0.2 0.2 0.1</size></box></geometry></collision>
     </link>
     <link name="fence_s">
       <pose>5.5 -0.025 0.05 0 0 0</pose>

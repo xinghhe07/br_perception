@@ -19,6 +19,18 @@
     # 坐标系名称 (§1.5) — TF 树: world ← odom ← base_link ← {livox_frame, 相机}
     # ═══════════════════════════════════════════════════════════════════════
     world_frame: "world"                     # 世界坐标系 (场地坐标: 原点=西南角, X 东, Y 北)
+    # ⚠️⚠️ 本键与 `lidar_params.yaml` 的 `world_frame` **同名，且两份都是 `/**` 通配文件** ⇒
+    #    `check_param_consumers.py` 会报 B1（**不是误报**，是"两份通配同名"的真形状）。
+    #    ✅ **2026-09-25 核实过：当前发不出来** —— 逐节点查了 `bringup_full` 的 parameters 列表：
+    #      · `lidar_perception_node` ← lidar_params + field_geometry + debug_flags（后两份没有本键）
+    #      · `perception_pipeline`  ← perception_params + fusion_params（前者没有本键）
+    #      ⇒ **没有任何节点同时拿到两份定义了本键的文件** ⇒ 顺序决定不了谁生效。
+    #    ⚠️ 但它是**脆的**：只要有人给上面任一节点**多加一份** yaml（比如给 pipeline 传 lidar_params），
+    #       本键就**立刻变成"靠 launch 顺序定值"** —— 而那**不报错**。
+    #    ⚠️ 顺带删掉了 `camera_params.yaml` 那份：**它是个死键**（`sky_block_detector` 既不 declare
+    #       也不读，它用的是 `spot_header.frame_id`），留着只会让人以为改了有用。
+    #    **不改作用域**：那份文件整份是 `/**`，挪进节点作用域会在容器化改名后静默失效。
+    #    ⇒ 纪律: **别把这两份同时传给同一个节点**（今天没有 launch 这么传）。
     odom_frame: "odom"                       # 里程计坐标系 (§4.1; 文档 §1.5 表未列, 本处补)
     robot_base_frame: "base_link"            # 机器人基座
     lidar_frame: "livox_frame"               # 雷达 (Livox Mid-360 出厂 frame_id)

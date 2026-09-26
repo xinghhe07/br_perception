@@ -141,6 +141,14 @@ private:
 
   uint8_t  mode_{kModeIdle};
   uint64_t frame_seq_{0};
+
+  /// 最近一帧深度图的**年龄** [s] = `now − 深度图 header.stamp`。
+  ///
+  /// ⚠️ 2026-09-26 加：本节点此前**只测"处理耗时"（`proc_ms`），从不测"数据有多旧"**
+  ///    —— 与 `lidar_perception_node` 原来那个毛病一模一样。而延迟预算按后者算，
+  ///    所以「三路总延迟」里 **D435i 这一路一直是无从计入的**。
+  ///   ⚠️ D435i 在**判色（40/80 分）**的关键路径上 ⇒ 它不该是个盲区。
+  double last_frame_age_sec_{0.0};
   double   last_confidence_{0.0};   // 最近一次的 confidence（诊断用，1Hz 才读）
   rclcpp::Time last_diag_time_;
 

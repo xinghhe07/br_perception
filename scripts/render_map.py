@@ -81,23 +81,23 @@ def draw_field(ax, detail=True):
     step = sb['grid_step']
     ox, oy = sb['grid_origin']
     pos = sb['positions']
-    # ⚠ 2026-09-17: positions 第三个数语义已由"颜色"改为"分色方向"(1.0=沿y分 2.0=沿x分) ——
-    #   天空块改成**红蓝各半**了。本脚本是旧渲染器 (现行的是 render_map_from_sdf.py),
-    #   这里同步成画两个半块, 免得图上颜色对不上世界。
+    # ⚠️⚠️ 2026-09-24 裁定: 天空方块**顶面是纯色**（"每块红蓝各半"是误读）——
+    #    依据见 `config/field_geometry.yaml` 的 `sky_block_initial` 与台账 §八 9.4。
+    #    ⇒ 俯视图（本图就是俯视图）看到的是**顶面** ⇒ 每格画**一个整色块**，
+    #      而不是原来那样把它切成红半/蓝半（那是误读的产物，图上颜色对不上世界）。
+    #    ⚠️ 画哪个色 = "**正放**时朝上的颜色" ⇒ 当前模型是**红上**（`make_field_from_config.py`
+    #       建的是"下蓝上红"两个半高件）⇒ 这里画红。
+    #    ⚠️ **待确认(FAQ)**: 规则书 Figure 4 里各格朝上的颜色（红/蓝交错图案）本仓库
+    #       **没有可解析依据** ⇒ 现在全画红。若 Figure 4 确为交错，这里要按那份数据改。
+    #    ⚠️ `code`（红南/红北/红西/红东）是**块在棋盘里的方向记号**，**不影响顶面颜色**
+    #       ⇒ 本图不再按它切块。（仍在 `positions` 里保留，那是官方总装配的实测数据。）
+    #    ⚠️ 本脚本是旧渲染器，**现行的是 `render_map_from_sdf.py`**（直接读生成的 model.sdf，
+    #       天然与模型一致）—— 两处都要对，别只改一处。
     for i in range(0, len(pos), 3):
-        x, y, code = pos[i], pos[i + 1], pos[i + 2]
+        x, y, _code = pos[i], pos[i + 1], pos[i + 2]
         x0, x1 = x - step / 2, x + step / 2
         y0, y1 = y - step / 2, y + step / 2
-        if code == 1.0:                                   # 沿 y 分, 红南
-            red, blue = (x0, y0, x1, y), (x0, y, x1, y1)
-        elif code == 2.0:                                 # 沿 y 分, 红北
-            red, blue = (x0, y, x1, y1), (x0, y0, x1, y)
-        elif code == 3.0:                                 # 沿 x 分, 红西
-            red, blue = (x0, y0, x, y1), (x, y0, x1, y1)
-        else:                                             # 4.0 沿 x 分, 红东
-            red, blue = (x, y0, x1, y1), (x0, y0, x, y1)
-        rect(ax, red[0], red[1], red[2], red[3], rgb('sky_block_red_face'), ec='#333', lw=0.5, z=4)
-        rect(ax, blue[0], blue[1], blue[2], blue[3], rgb('sky_block_blue_face'), ec='#333', lw=0.5, z=4)
+        rect(ax, x0, y0, x1, y1, rgb('sky_block_red_face'), ec='#333', lw=0.5, z=4)
 
     # ── 存储区 ──
     for side, col_key in (('ours', 'storage_red'), ('theirs', 'storage_blue')):

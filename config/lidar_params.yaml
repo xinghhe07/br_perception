@@ -11,6 +11,20 @@
     enable_outlier_filter: true
     outlier_mean_k: 10
     outlier_std_thresh: 1.0
+    # ── 坐标系（2026-09-24 新增）──
+    #   ⚠️⚠️ 本节点的**每个常量都是场地系的值**（l0/l1/l2_height、roi、building_spot_*），
+    #      而输入点云是雷达系（`livox_frame`）⇒ 进回调先整份搬到本键指定的系里。
+    #   ⚠️ 名字必须与融合层 `fusion_params.yaml` 的 `world_frame` 一致;
+    #      没人广播它时（`perception_pipeline` 没起）本节点**全帧报 UNKNOWN**, 且不报错。
+    #   ⚠️ 置空串 = 明确"不换系"（只在"输入点云本来就在场地系"时才对）。
+    #   ⚠️⚠️ **本键在两份 `/**` 通配文件里同名**（这里 + `fusion_params.yaml`）——
+    #       `check_param_consumers.py` 会把它报成 B1（它**没报错**，这是真形状）。**不改作用域**:
+    #       本文件整份都是 `/**`, 而容器化重构会改节点名 ⇒ 挪进节点作用域块会**静默失效**。
+    #       ⇒ 唯一的纪律: **别把这两份同时传给同一个节点**（今天没有一条 launch 这么做,
+    #         所以它现在咬不到人）。真这么传 = 谁生效取决于 `parameters=` 里的先后顺序。
+    world_frame: "world"
+    tf_timeout_sec: 0.05               # ⚠️ 别用 tf2 默认的 0（同 mustika_pillar_check 的教训）
+
     roi_min_x: -10.0                   # ROI 裁剪范围
     roi_max_x: 30.0
     roi_min_y: -10.0
@@ -93,6 +107,32 @@
     complete_tower_max: 1.10
 
     # ── 调试 & 看门狗 ──
+    # ═══════════════════════════════════════════════════════════════════════
+    # 中间结果话题发不发（2026-09-24 新增）
+    # ═══════════════════════════════════════════════════════════════════════
+    # ⚠️⚠️ 它**不是调试开关** —— 本键只管 **2 条数据接口话题**：
+    #      `filtered`（1 个订阅者：`ground_segmenter`）
+    #      `non_ground`（3 个订阅者：`building_spot_analyzer` / `cluster_extractor` /
+    #                    `cylinder_detector`）
+    #    ⇒ 它们是**容器化拓扑里 4 个组件的输入**。关掉 = 组件链饿死，症状是
+    #      "组件全都不出结果"，与"代码坏了"长得一样（跑单体时**完全看不出来**）。
+    #    ⚠️ 另外 8 条（ground / l0..l2_surface / ground_plane / pillars / obstacles /
+    #       building_spots / debug_cloud）实测**零订阅者**，是纯可视化 ⇒ 仍挂
+    #       `debug_enabled`（比赛关掉没人饿死）。**两组语义不同，别合并**。
+    #    ⚠️ 数字要复核就跑 `python3 scripts/check_topic_consumers.py`（就是那句纪律的自动化）。
+    #
+    # ⚠️ **为什么它不放在 `config/debug_flags.yaml`**（虽然那里是"发不发"类开关的
+    #    唯一事实源）：那个文件的职责写着"**比赛时全部关闭以节省性能**"，
+    #    而本键的默认是 **true（发）** —— 放进那个文件就等于请人把它当调试开关关掉，
+    #    而关掉的后果是"组件全都不出结果"。语义不同 ⇒ 位置不同。
+    # ⚠️ 与 `debug_enabled` 的分工（**别互相替代**）：
+    #      `publish_intermediate_topics` = 数据接口有没有消费者（默认 **true**）
+    #      `debug_enabled`               = 给人看的东西（`debug_cloud`/RViz 装饰，默认 false）
+    #
+    # 判据：**关之前先列出订阅者** —— `python3 scripts/check_topic_consumers.py`
+    # 什么时候可以置 false：确认"**单体独占、组件不在场**"时（省下 6 次整份点云拷贝）
+    publish_intermediate_topics: true
+
     # ⚠️ `debug_enabled` **已移走**，别再往这里加回来：
     #    调试开关的**唯一事实源**是 `config/debug_flags.yaml`。
     #    原先这里写着 `true`，而 debug_flags.yaml 里是 `false` —— 谁生效取决于

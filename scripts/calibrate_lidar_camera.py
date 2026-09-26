@@ -47,8 +47,16 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT = SCRIPT_DIR.parent
-# ⚠️ 2026-09-21: 外参已拆到 camera_hardware.yaml（不是 ROS 节点参数文件）
-HARDWARE = ROOT / "config" / "camera_hardware.yaml"
+sys.path.insert(0, str(SCRIPT_DIR))
+
+# ⚠️ 内外参已拆到 camera_hardware.yaml（不是 ROS 节点参数文件）。
+#   路径与判据都从 calib_common 来 —— 那条判据原先在本脚本里**写错过一次**
+#   （只判 `fx == 800.0`，于是 tele 的 2380 冒充"已标定"通过了本检查），
+#   现在收在一处，见那个模块的头注释。
+from calib_common import (  # noqa: E402
+    CAMERAS, HARDWARE, frame_size_note, placeholder_reasons,
+    print_runtime_debt, resolution_note, runtime_note, sky_block_note,
+)
 
 # FAST-Calib 的 ROS2 fork —— 已测 Humble
 FASTCALIB_REPO = "https://github.com/OpenMind/FAST-Calib"
@@ -67,20 +75,41 @@ def cmd_check(a):
     print("═══ §8.2 前置检查 ═══\n")
     ok = True
 
-    # 1) 相机内参
+    # 1) 相机内参 —— §8.2 的硬前置
+    # ⚠️ 判据在 calib_common.placeholder_reasons()。本处原先判的是 `fx == 800.0`,
+    #    tele 的 2380（同样是占位值）就此**冒充通过** —— 见那个模块的头注释。
     doc = _read_config()          # 硬件文件是平铺的
-    for cam in ("camera_wide", "camera_tele"):
-        K = doc.get(cam, {}).get("intrinsics", {}).get("camera_matrix") or []
-        fx = K[0] if K else None
-        if fx == 800.0:
-            print("  ✗ %s 内参仍是占位值 (fx=800.0) —— 先跑 §8.1 calibrate_camera.py" % cam)
-            ok = False
-        elif fx is None:
-            print("  ✗ %s 读不到内参" % cam)
+    print("  ── 内参体检（§8.1 的产出，也就是本步的输入）──")
+    for i, cam in enumerate(CAMERAS):
+        cfg = doc.get(cam) or {}
+        reasons = placeholder_reasons(cfg)
+        if reasons:
+            print("    ✗ %s —— **占位值，未标定**，%d 条证据:" % (cam, len(reasons)))
+            for r in reasons:
+                print("        · %s" % r)
+            print("      ⇒ 先跑 §8.1: python3 calibrate_camera.py images "
+                  "--dir <标定图> --camera %s --apply" % cam)
             ok = False
         else:
-            print("  ✓ %s 内参已标 (fx=%.3f), 生成 qr_params 用:" % (cam, fx))
-            print("      python3 calibrate_camera.py images ... --apply")
+            K = ((cfg.get("intrinsics") or {}).get("camera_matrix")) or []
+            print("    ✓ %s 看起来是标定值（fx=%.3f，无占位特征）" % (cam, K[0]))
+            # ⚠️ 用『』而不是 ASCII 引号 —— 这是**字符串字面量内部**, 双引号会截断它
+            print("      ⚠️ 本检查**只判『没标』**，不判『标得对不对』 —— "
+                  "重投影 RMS 要回 §8.1 的输出看")
+        # ⚠️ 占位值不跑主点校验（占位值的主点就是照图心造的, 必然通过）⇒ 返回 None
+        note = resolution_note(cfg)
+        if note:
+            print("      %s" % note)
+        for line in frame_size_note(cam, cfg):
+            print("      %s" % line)
+        note = runtime_note(i)
+        if note:
+            print("      %s" % note)
+        note = sky_block_note(cam)
+        if note:
+            print("      %s" % note)
+    if not ok:
+        print_runtime_debt(indent="    ")
     print()
 
     # 2) fast_calib 是否装了
