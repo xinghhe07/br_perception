@@ -171,12 +171,13 @@ def draw_field(ax, detail=True):
         cx, cy = rz[side]
         rect(ax, cx - 0.35, cy - 0.35, cx + 0.35, cy + 0.35, rgb(col_key), ec='#222', lw=0.7, z=7)
 
-    # ── L1→L2 阶梯 (红西条 / 蓝东条) ──
+    # ── L1→L2 阶梯 (红西条 / 蓝东条) —— V3 撤销, 跟随 config.enabled ──
     s2 = P['l1_l2_stairs']
-    for side, col_key in (('ours', 'l2_stairs_red'), ('theirs', 'l2_stairs_blue')):
-        sx0, sx1 = s2[side]['x_range']
-        sy0, sy1 = s2['y_range']
-        rect(ax, sx0, sy0, sx1, sy1, rgb(col_key), alpha=0.95, ec='#333', lw=0.7, z=8)
+    if s2.get('enabled', True):
+        for side, col_key in (('ours', 'l2_stairs_red'), ('theirs', 'l2_stairs_blue')):
+            sx0, sx1 = s2[side]['x_range']
+            sy0, sy1 = s2['y_range']
+            rect(ax, sx0, sy0, sx1, sy1, rgb(col_key), alpha=0.95, ec='#333', lw=0.7, z=8)
 
     # ── L2 平台 ──
     l2 = P['l2_platform']

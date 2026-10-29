@@ -5,6 +5,15 @@
 # 坐标系: 原点 = 场地西南角, X 东, Y 北, Z 上; 单位 = 米(m)。
 # 红队(我方)在西半场, 蓝队在东半场, 中轴 x=5.5。
 #
+# ── 规则基线 (2026-11 更新) ──
+#   ★ 国内赛: 《第二十六届全国大学生机器人大赛 ROBOCON 竞技赛主题与规则 V3「女娲补天」
+#             征求意见稿》(最后修订 2026-11-05)
+#   ★ 国际赛: ABU ROBOCON 2027 Rulebook v1.1 (Mustika Nusantara)
+#   两者场地骨架一致。**已知差异已在本文件体现**:
+#     · 储存区颜色 → V3 改为"传递区同色"(见 zone_colors.storage_red/blue)
+#     · L1↔L2 阶梯 → V3 撤销(见 l1_l2_stairs.enabled=false)
+#   术语对照: 塔基/中段 = earth_block; 塔顶 = sky_block; 五色石 = mustika
+#
 # 2026-09-09 更新: 全部区域位置/大小按 C:\学习\地图.SLDPRT 线稿实测回填
 #   (线稿 = 各区域边界俯视框, 用户确认尺寸精确; 围栏宽 20mm、高 50mm,
 #    模型场地平面: X 东/北向取线稿 Y, SW 实体仅作高度参照)
@@ -231,7 +240,14 @@
         width: 1.0
         rise: 0.6
         slope_deg: 9.7
-    l1_l2_stairs:                   # ✅ CONFIRMED-SW 草图25 / 拉伸7: L1→L2 阶梯 (2026-09-11 用户确认)
+    l1_l2_stairs:                   # ⚠️ V3 已撤销 L1→L2 阶梯; 几何保留备查, 由 enabled 控制
+      # ★ 2026-11 规则基线变更(女娲补天 V3):
+      #   修订历史 5/11: 图1/2/3 去掉 L1 与 L2 之间的阶梯; 2.16 撤销该阶梯;
+      #   术语 16: "L1 与 L2 之间没有阶梯。机器人 BR 可从 L1 的任何位置登上 L2。L2 没有任何围栏。"
+      #   ⚠️ 但草案**自相矛盾**: 正文第 10 页仍残留 "L1 与 L2 之间则有一级阶梯相连",
+      #      附录1 颜色表也仍列 "L2 阶梯(红/蓝)" ⇒ 已列入待组委会确认清单。
+      #   在确认前: 生成器/绘图按 enabled=false **不画**该阶梯; 保留几何以便回滚。
+      enabled: false
       # 草图25 是两条 0.3×1.0 分离小条 (非贯通矮带); 拉伸7 包围盒 x[3.7,7.3] Z[0.75,0.9] 只是两者合并后的 bbox
       # 实体从 L1 顶 (SW 0.75) 升到 0.9 = 中间踏面 (场地 z 0.75 = L1+0.15), 再上 0.15 即 L2 (0.9)
       description: "L1 上 L2 阶梯: **1 级 ×150mm** (0.6 → 0.75 踏面 → 踩 L2 完成第 2 次升高至 0.9); 台块 0.3 宽×1.0 深; 位于 L2 西/东边缘 y[5.0,6.0] (正对中轴), 红用西条、蓝用东条"
@@ -355,15 +371,20 @@
       # ── 地面 ──
       ground_red:            [240, 210, 210]   # Ground Area (Red)
       ground_blue:           [170, 210, 230]   # Ground Area (Blue)
-      ground_shared_cream:   [245, 240, 200]   # Ground Shared Area
+      ground_shared_cream:   [245, 240, 200]   # Ground Shared Area (= 地面第一/第二公共区)
+      ground_public_empty:   [190, 190, 185]   # Ground Public Area(空) — V3 附录1 新增条目
       # ── 启动区 / 重试区 ──
       start_retry_red:       [223, 34, 34]     # Start Zone / Retry Zone (Red)
       start_retry_blue:      [50, 0, 255]      # Start Zone / Retry Zone (Blue)
       l1_retry_red:          [223, 34, 34]     # L1 Retry Zone (Red)
       l1_retry_blue:         [50, 0, 255]      # L1 Retry Zone (Blue)
-      # ── 存储区 (与同色地面同值 → 无法靠颜色区分, 需靠几何) ──
-      storage_red:           [240, 210, 210]   # Storage Area (Red)  ≡ ground_red
-      storage_blue:          [170, 210, 230]   # Storage Area (Blue) ≡ ground_blue
+      # ── 储存区 —— ★ V3 改动: 取**传递区同色**(不再与地面同色) ──
+      #   V3 附录1: 储存区(红) 245-170-60 / (蓝) 60-170-245
+      #   依据 V3 第 10 页注: ABU 版把储存区涂成启动区色、§14 又涂成地面色, 都不合适;
+      #   本规则让"储存区颜色 = 对应传递区颜色"(机器人把同色储存区的塔基/中段搬进同色传递区)。
+      #   ⚠️ 后果: 储存区与地面**不再是同色**, 视觉上可区分; 但与传递区同色 ⇒ 两者靠**位置**区分。
+      storage_red:           [245, 170, 60]    # Storage Area (Red)  ≡ transfer_red
+      storage_blue:          [60,  170, 245]   # Storage Area (Blue) ≡ transfer_blue
       # ── L1 ──
       l1_area_red:           [235, 180, 160]   # Level 1 Area (Red)
       l1_area_blue:          [150, 215, 220]   # Level 1 Area (Blue)

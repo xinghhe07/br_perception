@@ -220,14 +220,17 @@ def gen_field():
         s.box('transfer_%s' % side, min(tc[0::2]), min(tc[1::2]), max(tc[0::2]), max(tc[1::2]),
               0, L1H, col(tc_key))       # 与 L1 同高的实心台
 
-    # ── L1→L2 阶梯 (红西条 / 蓝东条), 2 级 ──
+    # ── L1→L2 阶梯 (红西条 / 蓝东条) ──
+    #   ⚠️ V3「女娲补天」撤销了 L1↔L2 阶梯(术语16: BR 可从 L1 任意位置登上 L2)
+    #   ⇒ 由 config 的 `l1_l2_stairs.enabled` 控制; false 时**不画**(几何仍留在 config 里备查)
     s2 = P['l1_l2_stairs']
-    sy0, sy1 = s2['y_range']
-    hstep2 = s2['step_height']
-    for side, key in (('ours', 'l2_stairs_red'), ('theirs', 'l2_stairs_blue')):
-        sxr = s2[side]['x_range']         # 红 x[3.7,4.0] 贴 L2 西边 / 蓝 x[7.0,7.3] 贴 L2 东边
-        s.box('l2stair_%s' % side, sxr[0], sy0, sxr[1], sy1,
-              L1H, L1H + hstep2, col(key))     # 中间踏面; 再上一级即 L2 平台本身
+    if s2.get('enabled', True):
+        sy0, sy1 = s2['y_range']
+        hstep2 = s2['step_height']
+        for side, key in (('ours', 'l2_stairs_red'), ('theirs', 'l2_stairs_blue')):
+            sxr = s2[side]['x_range']         # 红 x[3.7,4.0] 贴 L2 西边 / 蓝 x[7.0,7.3] 贴 L2 东边
+            s.box('l2stair_%s' % side, sxr[0], sy0, sxr[1], sy1,
+                  L1H, L1H + hstep2, col(key))     # 中间踏面; 再上一级即 L2 平台本身
 
     # ── L2 平台 (无侧墙) ──
     #   ⚠ 2026-09-11: 规则书 §14 色表里虽列了 "L2 Side Wall", 但**实物/团队模型没有** ——

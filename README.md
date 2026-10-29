@@ -339,6 +339,7 @@ colcon test-result --verbose
 | `odometry_tuning.md` | Point-LIO 里程计调优 |
 | `容器化重构设计_20260914.md` / `容器化重构_任务清单_20260914.md` | 组件容器化重构 |
 | `自主探索_多层costmap与在线规划.md` | 多层代价地图与在线规划 |
+| `强化学习决策与导航方案.md` | 基于结构化状态的分层 PPO 决策与局部导航推荐方案 |
 | `模型训练指南.md` | YOLO 数据集 / 训练 / 导出 ONNX |
 | `待编译验证清单_20260920.md` | Ubuntu 侧编译验收清单 |
 | `Robocon_2027_Rulebook_v1.0 _CN.pdf` + 四份算法综述 | 规则与选型依据 |

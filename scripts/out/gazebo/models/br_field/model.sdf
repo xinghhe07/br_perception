@@ -22,11 +22,11 @@
     </link>
     <link name="storage_ours">
       <pose>1 10.5 0.002 0 0 0</pose>
-      <visual name="v"><geometry><box><size>2 1 0.004</size></box></geometry><material><ambient>0.941 0.824 0.824 1.00</ambient><diffuse>0.941 0.824 0.824 1.00</diffuse></material></visual>
+      <visual name="v"><geometry><box><size>2 1 0.004</size></box></geometry><material><ambient>0.961 0.667 0.235 1.00</ambient><diffuse>0.961 0.667 0.235 1.00</diffuse></material></visual>
     </link>
     <link name="storage_theirs">
       <pose>10 10.5 0.002 0 0 0</pose>
-      <visual name="v"><geometry><box><size>2 1 0.004</size></box></geometry><material><ambient>0.667 0.824 0.902 1.00</ambient><diffuse>0.667 0.824 0.902 1.00</diffuse></material></visual>
+      <visual name="v"><geometry><box><size>2 1 0.004</size></box></geometry><material><ambient>0.235 0.667 0.961 1.00</ambient><diffuse>0.235 0.667 0.961 1.00</diffuse></material></visual>
     </link>
     <link name="start_ours_tr">
       <pose>0.35 0.35 0.002 0 0 0</pose>
@@ -119,16 +119,6 @@
       <pose>9 4.2 0.3 0 0 0</pose>
       <visual name="v"><geometry><box><size>1 1 0.6</size></box></geometry><material><ambient>0.235 0.667 0.961 1.00</ambient><diffuse>0.235 0.667 0.961 1.00</diffuse></material></visual>
       <collision name="c"><geometry><box><size>1 1 0.6</size></box></geometry></collision>
-    </link>
-    <link name="l2stair_ours">
-      <pose>3.85 5.5 0.675 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.3 1 0.15</size></box></geometry><material><ambient>0.922 0.706 0.627 1.00</ambient><diffuse>0.922 0.706 0.627 1.00</diffuse></material></visual>
-      <collision name="c"><geometry><box><size>0.3 1 0.15</size></box></geometry></collision>
-    </link>
-    <link name="l2stair_theirs">
-      <pose>7.15 5.5 0.675 0 0 0</pose>
-      <visual name="v"><geometry><box><size>0.3 1 0.15</size></box></geometry><material><ambient>0.588 0.843 0.863 1.00</ambient><diffuse>0.588 0.843 0.863 1.00</diffuse></material></visual>
-      <collision name="c"><geometry><box><size>0.3 1 0.15</size></box></geometry></collision>
     </link>
     <link name="l2_platform">
       <pose>5.5 5.5 0.75 0 0 0</pose>
