@@ -41,6 +41,7 @@ desktop.ini
 
 # ── 规则书原件 (主办方材料, public 仓库不宜转载; 要纳管就删掉下面两行) ──
 doc/Robocon_2027_Rulebook_v1.0 _CN.pdf
+doc/第二十六届全国大学生机器人大赛女娲补天竞技赛规则V3-征求意见稿*.pdf
 scripts/_rb11.pdf
 
 # ── 规则书提取文本 (与上面的 PDF 同理: 主办方材料, public 仓库不宜转载) ──
@@ -54,6 +55,14 @@ src/**/*.svg
 # ── 本机临时构建/提取产物 (Windows 侧 g++ 试编、PDF 抽文本等) ──
 #    ⚠️ 里面会有从主办方 PDF 抽出来的文本 → 与上面的规则书同理, 不能进 public 仓库
 .local_build/
+.tmp_pdf*/
+.tmp_github/
+
+# ── Python 训练侧产物 (rl/ 只纳管源码与依赖锁) ──
+rl/models/
+rl/runs/
+rl/logs/
+rl/*.zip
 
 # 标定采集图（本地产物，不入库）
 calib_imgs/

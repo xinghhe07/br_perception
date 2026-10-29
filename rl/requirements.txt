@@ -1,0 +1,25 @@
+# BR 决策策略训练环境 — 依赖锁定(2026-10-29 实测通过)
+# ============================================================================
+# 依据: doc/强化学习决策与导航方案.md §5(学习方法) §6.3(MuJoCo) §9 Phase 2
+# 环境: D:\Anaconda3\envs\rl —— Python 3.11.15 / Windows
+#
+# 说明:
+#   · torch 2.11.0+cu128 是 CUDA 12.8 构建, 必须走 PyTorch 官方索引才能装到同版本
+#   · numpy 固定在 1.x: torch/SB3 生态对该组合已验证; 升 2.x 前先跑 rl/smoke_test.py
+#   · 本文件只锁"训练侧"依赖; ROS 侧(感知/融合/通信)依赖见 package.xml, 两者互不混用
+#
+# 安装:
+#   python -m pip install -r rl/requirements.txt \
+#       --extra-index-url https://download.pytorch.org/whl/cu128
+#
+# 验证(mask 是否真的生效, 不只是 import):
+#   python rl/smoke_test.py
+
+torch==2.11.0+cu128
+stable_baselines3==2.9.2
+sb3_contrib==2.9.2
+gymnasium==1.4.0
+mujoco==3.15.0
+numpy==1.26.4
+Farama-Notifications==0.0.6
+cloudpickle==3.1.2
